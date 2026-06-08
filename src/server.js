@@ -272,16 +272,46 @@ Do not add banners or disclaimers about content being generated.`;
 
 function eventPrompt(session, event) {
   const target = event.target || {};
-  const actionDesc = event.eventType === 'click'
-    ? `Clicked: ${target.tag || 'element'} with text "${clip(target.text || '', 80)}" (selector: ${event.clickedSelector || 'unknown'})`
-    : event.eventType === 'submit'
-    ? `Submitted form with data: ${JSON.stringify(event.formData || {})}`
-    : event.eventType === 'enter'
-    ? `Pressed Enter in ${target.tag || 'input'} with value "${clip(target.value || '', 200)}"`
-    : `Event: ${event.eventType}`;
-  const currentButtons = extractInteractiveTags(session.html || '');
-  const stateStr = session.appState ? JSON.stringify(session.appState, null, 2) : '{}';
-  return `The user interacted with this VibeOS app. Generate the next full HTML fragment and updated state.
+  const tag = target.tag || 'element';
+  const role = target.role || '';
+  const name = target.accessibleName || target.ariaLabel || target.name || '';
+  const selector = event.clickedSelector || '';
+  const allInputs = event.allInputs || (session.appState?._liveInputs) || {};
+
+  // P0: Rich event descriptions for every event type
+  let actionDesc;
+  switch (event.eventType) {
+    case 'click':
+      actionDesc = `Clicked: [${role || tag}] "${clip(target.text || name || '', 80)}" (selector: ${selector})`;
+      break;
+    case 'submit':
+      actionDesc = `Submitted form with data: ${JSON.stringify(event.formData || {})}`;
+      break;
+    case 'enter':
+      actionDesc = `Typed "${clip(target.value || '', 200)}" in [${role || tag}] "${name || target.id || 'input'}", then pressed Enter`;
+      break;
+    case 'change': {
+      const val = target.type === 'checkbox'
+        ? (target.value === 'true' || target.value === true ? 'checked' : 'unchecked')
+        : `"${clip(target.value || '', 100)}"`;
+      actionDesc = `Changed: [${role || tag}] "${name || target.id || 'input'}" → ${val}`;
+      break;
+    }
+    case 'input_snapshot':
+      actionDesc = `User is typing in [${role || tag}] "${name || target.id || 'input'}" — current value: "${clip(target.value || '', 200)}"`;
+      break;
+    default:
+      actionDesc = `Event: ${event.eventType}`;
+  }
+
+  // Clean internal tracking fields before sending to LLM
+  const cleanState = session.appState ? { ...session.appState } : {};
+  delete cleanState._liveInputs;
+  const stateStr = Object.keys(cleanState).length ? JSON.stringify(cleanState, null, 2) : '{}';
+  const trace = event.interactionTrace || '';
+
+  // P1: Send trace + state + action, not full HTML dump
+  return `The user interacted with this VibeOS app. Generate the next HTML and updated state.
 
 App context:
 - appId: ${session.appId || 'custom'}
@@ -294,11 +324,9 @@ ${actionDesc}
 Current application state (JSON):
 ${stateStr}
 
-Current interactive elements on the page:
-${currentButtons.slice(0, 30).join('\n')}${currentButtons.length > 30 ? '\n...' : ''}
-
-Previous HTML:
-${clip(session.html || '', 12000)}
+${trace ? `Recent user interaction trace (newest first):\n${trace}\n` : ''}
+Current form/input values snapshot:
+${JSON.stringify(allInputs, null, 2).slice(0, 2000)}
 
 CRITICAL INSTRUCTIONS:
 1. FIRST, update the "state" object based on the user's action:
@@ -306,11 +334,13 @@ CRITICAL INSTRUCTIONS:
    - Terminal: append {cmd, output} to history array
    - Browser: update url/query, generate results content
    - Tasks: add new task to tasks array, toggle done status
-   - Notepad: update text/title from form data
+   - Notepad: update text/title from form data, preserve all typed content
    - Files: update path, selected items
-2. THEN, render HTML that reflects the UPDATED state. The HTML input fields must show the new state values.
+   - For input_snapshot: preserve all current input values in state, do NOT reset the page
+2. THEN, render HTML that reflects the UPDATED state. All input fields must retain their current values.
 3. Keep the UI layout and style consistent. Only modify what the action changes.
-4. Return strict JSON with title, html, state, and narration fields.`;
+4. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
+5. Return strict JSON with title, html, state, and narration fields.`;
 }
 
 async function generateInitialHtml(app) {
@@ -344,12 +374,15 @@ async function generateNextHtml(session, event) {
     const result = normalizeModelResult(raw, session.title);
     session.appState = result.state;
     session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
+    // P2: Preserve the first user message (initial intent) — only prune middle pairs
     while (session.messages.length > CONFIG.maxSessionMessages) {
-      const first = session.messages[0];
-      if (first.role === 'user' && session.messages.length > 2 && session.messages[1].role === 'assistant') {
-        session.messages.splice(0, 2);
+      // Skip index 0 (initial intent) — start pruning from index 2
+      if (session.messages.length > 4 && session.messages[2].role === 'user' && session.messages[3]?.role === 'assistant') {
+        session.messages.splice(2, 2);
+      } else if (session.messages.length > 2) {
+        session.messages.splice(2, 1);
       } else {
-        session.messages.shift();
+        break;
       }
     }
     t.stop({ ok: 1, hlen: result.html.length, mcnt: session.messages.length });
@@ -514,6 +547,16 @@ async function handleApi(req, res, url) {
     }
     const event = await readJson(req);
     logger.perf('evt', { etp: event.eventType, aid: session.appId, sid: session.id, sel: event.clickedSelector?.slice(0, 40) || '' });
+
+    // input_snapshot: update state silently, no LLM call
+    if (event.eventType === 'input_snapshot') {
+      if (event.allInputs) {
+        session.appState = { ...session.appState, _liveInputs: event.allInputs };
+      }
+      session.updatedAt = new Date().toISOString();
+      return send(res, 200, { id: session.id, title: session.title, html: session.html, narration: '', provider: providerStatus(), silent: true });
+    }
+
     const result = await generateNextHtml(session, event);
     session.title = result.title || session.title;
     session.html = result.html;

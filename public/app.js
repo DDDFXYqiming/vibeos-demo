@@ -341,10 +341,96 @@ ${html || ''}
   const sessionId = ${JSON.stringify(sessionId)};
   const MAX_HTML = 14000;
   const MAX_TEXT = 3000;
+  const MAX_TRACE = 20;
+
+  // ── Interaction Trace Ring Buffer ──
+  const trace = [];
+  function pushTrace(desc) {
+    const now = new Date();
+    const ts = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
+    trace.push('- ' + ts + ' ' + desc);
+    if (trace.length > MAX_TRACE) trace.shift();
+  }
+  function getTrace() { return trace.slice().reverse().join('\\n'); }
+
   function clip(str, max) {
     str = String(str == null ? '' : str);
     return str.length > max ? str.slice(0, max) + '\\n...[clipped]' : str;
   }
+
+  // ── Accessible Name Resolution ──
+  function getAccessibleName(el) {
+    if (!el) return '';
+    const aria = el.getAttribute && el.getAttribute('aria-label');
+    if (aria) return aria;
+    const labelledBy = el.getAttribute && el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const labelEl = document.getElementById(labelledBy);
+      if (labelEl) return (labelEl.innerText || labelEl.textContent || '').trim().slice(0, 60);
+    }
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
+      const placeholder = el.getAttribute && el.getAttribute('placeholder');
+      if (placeholder) return placeholder;
+      const label = el.closest && el.closest('label');
+      if (label) return (label.innerText || label.textContent || '').trim().slice(0, 60);
+      if (el.id) {
+        const forLabel = document.querySelector('label[for="' + el.id + '"]');
+        if (forLabel) return (forLabel.innerText || forLabel.textContent || '').trim().slice(0, 60);
+      }
+    }
+    const text = (el.innerText || el.textContent || '').trim();
+    if (text && text.length <= 60) return text;
+    return '';
+  }
+
+  function getRole(el) {
+    if (!el) return '';
+    const explicit = el.getAttribute && el.getAttribute('role');
+    if (explicit) return explicit;
+    const tag = el.tagName;
+    if (tag === 'BUTTON') return 'button';
+    if (tag === 'A' && el.href) return 'link';
+    if (tag === 'INPUT') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (t === 'submit') return 'button';
+      if (t === 'range') return 'slider';
+      return 'textbox';
+    }
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'SUMMARY') return 'button';
+    if (tag === 'LI') return 'listitem';
+    if (tag === 'TR') return 'row';
+    if (tag === 'LABEL') return 'label';
+    return '';
+  }
+
+  // ── Element Context ──
+  function getElementContext(el) {
+    if (!el) return '';
+    const parent = el.closest('form,table,nav,ul,ol,[role="menu"],[role="list"],[role="toolbar"],fieldset,.card,.panel,.sidebar');
+    if (!parent) return '';
+    if (parent.tagName === 'FORM') {
+      const action = parent.getAttribute('action') || '';
+      const legend = parent.querySelector('legend');
+      return 'in form' + (legend ? ' "' + (legend.innerText||'').trim().slice(0,40) + '"' : '') + (action ? ' action=' + action : '');
+    }
+    if (parent.tagName === 'TABLE' || parent.getAttribute('role') === 'grid') {
+      const row = el.closest('tr,[role="row"]');
+      if (row) {
+        const cells = Array.from(row.querySelectorAll('td,th,[role="gridcell"],[role="cell"]'));
+        const rowText = cells.map(c => (c.innerText||'').trim()).filter(Boolean).join(' | ').slice(0, 60);
+        if (rowText) return 'in row: ' + rowText;
+      }
+      return 'in table';
+    }
+    const heading = parent.querySelector('h1,h2,h3,h4,h5,h6');
+    if (heading) return 'in section "' + (heading.innerText||'').trim().slice(0,40) + '"';
+    return '';
+  }
+
   function targetInfo(target) {
     if (!target) return {};
     const rect = target.getBoundingClientRect ? target.getBoundingClientRect() : {x:0,y:0,width:0,height:0};
@@ -354,8 +440,9 @@ ${html || ''}
       id: target.id || '',
       name: target.getAttribute && target.getAttribute('name') || '',
       type: target.getAttribute && target.getAttribute('type') || '',
-      role: target.getAttribute && target.getAttribute('role') || '',
+      role: getRole(target),
       ariaLabel: target.getAttribute && target.getAttribute('aria-label') || '',
+      accessibleName: getAccessibleName(target),
       text: clip(target.innerText || target.textContent || target.value || '', 500),
       value: target.value || target.getAttribute && target.getAttribute('value') || '',
       href: target.href || '',
@@ -381,6 +468,7 @@ ${html || ''}
     });
     return out;
   }
+
   function emit(eventType, nativeEvent, extra = {}) {
     const target = nativeEvent && nativeEvent.target;
     const info = targetInfo(target);
@@ -399,38 +487,113 @@ ${html || ''}
         documentText: clip(document.body.innerText || '', MAX_TEXT),
         documentHtml: clip(document.body.innerHTML || '', MAX_HTML),
         viewport: { width: innerWidth, height: innerHeight },
+        interactionTrace: getTrace(),
         ...extra
       }
     }, '*');
   }
-  document.addEventListener('submit', (e) => { e.preventDefault(); emit('submit', e); }, true);
+
+  // ── Event Listeners ──
+
+  // Submit
+  document.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = {};
+    try { for (const [k,v] of new FormData(form).entries()) fd[k] = v; } catch {}
+    const desc = 'submit [form] ' + JSON.stringify(fd).slice(0, 120);
+    pushTrace(desc);
+    emit('submit', e);
+  }, true);
+
+  // Click
   document.addEventListener('click', (e) => {
     const interactive = e.target.closest('button,a,[role="button"],summary,li,tr,.clickable,input[type="submit"],input[type="button"],label');
     if (interactive) {
       e.preventDefault();
+      const role = getRole(interactive);
+      const name = getAccessibleName(interactive);
+      const ctx = getElementContext(interactive);
+      const desc = 'click [' + role + '] "' + (name || interactive.tagName).slice(0, 40) + '"' + (ctx ? ' (' + ctx + ')' : '');
+      pushTrace(desc);
       emit('click', e, { clickedSelector: selector(interactive) });
     }
   }, true);
+
+  // Enter
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.target.matches('input,textarea,[contenteditable="true"]'))) {
       if (e.target.tagName !== 'TEXTAREA' || e.ctrlKey || e.metaKey) {
         e.preventDefault();
+        const role = getRole(e.target);
+        const name = getAccessibleName(e.target);
+        const val = (e.target.value || '').slice(0, 80);
+        const desc = 'enter [' + role + '] "' + (name || e.target.name || e.target.id || 'input') + '" = "' + val + '"';
+        pushTrace(desc);
         emit('enter', e);
       }
     }
   }, true);
+
+  // Change (select, checkbox, radio, range)
   document.addEventListener('change', (e) => {
-    if (e.target.matches('select,input[type="checkbox"],input[type="radio"],input[type="range"]')) emit('change', e);
+    if (e.target.matches('select,input[type="checkbox"],input[type="radio"],input[type="range"]')) {
+      const role = getRole(e.target);
+      const name = getAccessibleName(e.target) || e.target.name || e.target.id || 'input';
+      const val = e.target.type === 'checkbox' ? String(e.target.checked) : String(e.target.value || '');
+      const desc = 'change [' + role + '] "' + name.slice(0, 40) + '" → "' + val.slice(0, 60) + '"';
+      pushTrace(desc);
+      emit('change', e);
+    }
   }, true);
+
+  // Input snapshot (debounced, for text typing awareness)
+  let inputTimer = null;
+  document.addEventListener('input', (e) => {
+    if (!inputTimer) {
+      inputTimer = setTimeout(() => {
+        inputTimer = null;
+        const role = getRole(e.target);
+        const name = getAccessibleName(e.target) || e.target.name || e.target.id || 'input';
+        const val = (e.target.value || '').slice(0, 80);
+        const desc = 'type [' + role + '] "' + name.slice(0, 30) + '" = "' + val + (val.length >= 80 ? '...' : '') + '"';
+        pushTrace(desc);
+        parent.postMessage({
+          type: 'vibeos:event',
+          sessionId,
+          event: {
+            eventType: 'input_snapshot',
+            target: targetInfo(e.target),
+            allInputs: allInputs(),
+            interactionTrace: getTrace(),
+            documentText: clip(document.body.innerText || '', MAX_TEXT)
+          }
+        }, '*');
+      }, 500);
+    }
+  }, true);
+
+  // ── Selector (P2: ARIA role + accessible name) ──
   function selector(el) {
     if (!el) return '';
+    // Priority 1: ID
     if (el.id) return '#' + el.id;
-    const name = el.getAttribute('name');
-    if (name) return el.tagName.toLowerCase() + '[name="' + name + '"]';
-    const cls = (el.className || '').split(/\s+/).filter(c => c && !c.match(/^\d/)).slice(0, 2);
+    // Priority 2: ARIA role + accessible name
+    const role = getRole(el);
+    const name = getAccessibleName(el);
+    if (role && name) return '[' + role + '] "' + name.slice(0, 30) + '"';
+    // Priority 3: name attribute
+    const nameAttr = el.getAttribute('name');
+    if (nameAttr) return el.tagName.toLowerCase() + '[name="' + nameAttr + '"]';
+    // Priority 4: role only
+    if (role) return '[' + role + '] "' + (el.innerText || el.textContent || '').trim().slice(0, 24) + '"';
+    // Priority 5: classes
+    const cls = (el.className || '').split(/\\s+/).filter(c => c && !c.match(/^\\d/)).slice(0, 2);
     if (cls.length) return el.tagName.toLowerCase() + '.' + cls.join('.');
+    // Priority 6: text content
     const text = (el.innerText || el.textContent || '').trim().slice(0, 24);
     if (text) return el.tagName.toLowerCase() + ':contains("' + text + '")';
+    // Priority 7: nth-child fallback
     const idx = Array.from(el.parentNode ? el.parentNode.children : []).indexOf(el);
     return el.tagName.toLowerCase() + ':nth-child(' + (idx + 1) + ')';
   }
@@ -455,9 +618,12 @@ async function handleIframeMessage(message) {
       method: 'POST',
       body: JSON.stringify(data.event)
     });
-    win.querySelector('.window-title').textContent = result.title || record.title;
-    setIframeHtml(win, result.html, sessionId);
-    record.title = result.title || record.title;
+    // silent=true means input_snapshot — don't replace iframe (user is still typing)
+    if (!result.silent) {
+      win.querySelector('.window-title').textContent = result.title || record.title;
+      setIframeHtml(win, result.html, sessionId);
+      record.title = result.title || record.title;
+    }
   } catch (error) {
     toast(error.message);
     setIframeHtml(win, diagnosticHtml('LLM event failed', error.message), sessionId);
