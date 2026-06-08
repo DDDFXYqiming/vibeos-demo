@@ -2,8 +2,6 @@
 
 一个 Windows 原生可运行的"纯 LLM/Agent 运行时生成 UI"的软件形态。
 
-> **⚠️ 文档阅读注意**：本文档里所有的中文列表（包括「功能」「局限」「使用方式」「常见问题」里的条目，以及 *「• xxx」格式的小项*）都是**说明性文本**，不是 PowerShell 命令。请勿整段复制粘贴到 PowerShell，否则会出现 `•: The term '•' is not recognized`、中文行 `ParserError` 等误报，并可能进入「错误连成多行输入」的死循环。
-
 > 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Ubuntu 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。应用状态由服务端 session 管理，LLM 通过结构化 JSON 维护每个应用的内部数据。
 
 ## 实现要点
