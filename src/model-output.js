@@ -1,3 +1,5 @@
+import { normalizePatch } from './vibe-runtime.js';
+
 const DEFAULT_MAX_HTML_CHARS = 16_000;
 
 export function clip(value, max = 8000) {
@@ -198,6 +200,7 @@ export function normalizeModelResult(result, fallbackTitle = 'Vibe App', options
   return {
     title: clip(parsed.title || fallbackTitle, 80),
     html: stripUnsafeHtml(html || fallbackHtml('Empty response', 'The model returned no HTML.'), maxHtmlChars),
+    patch: normalizePatch(parsed.patch, maxHtmlChars),
     state: typeof state === 'object' && !Array.isArray(state) ? state : {},
     narration: clip(parsed.narration || parsed.explanation || '', 800),
     parseSource: parsedResult.source,

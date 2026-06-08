@@ -53,3 +53,11 @@ test('timeoutForModel gives pro or thinking models enough time while preserving 
   assert.equal(timeoutForModel({ model: 'mimo-v2.5', thinkingLevel: 'off', baseTimeoutMs: 45_000 }), 45_000);
   assert.equal(timeoutForModel({ model: 'mimo-v2.5-pro', thinkingLevel: 'high', baseTimeoutMs: 180_000 }), 180_000);
 });
+
+test('normalizeModelResult preserves safe local patch metadata for partial rendering', () => {
+  const raw = '{"title":"Patch","html":"<main><section id=\\"results\\"></section></main>","patch":{"selector":"#results","mode":"replaceInnerHTML","html":"<p>Updated</p>"},"state":{},"narration":"patched"}';
+
+  const normalized = normalizeModelResult(raw, 'Fallback');
+
+  assert.deepEqual(normalized.patch, { selector: '#results', mode: 'replaceInnerHTML', html: '<p>Updated</p>' });
+});

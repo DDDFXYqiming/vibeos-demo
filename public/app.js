@@ -51,7 +51,8 @@ const state = {
   z: 100,
   counter: 0,
   focused: null,
-  windows: new Map()
+  windows: new Map(),
+  closedSessions: new Map()
 };
 
 const el = {
@@ -88,10 +89,8 @@ async function boot() {
     toast(`Config load failed: ${error.message}`);
   }
 
+  logBoot('[ ok ] desktop ready without startup LLM call');
   setTimeout(() => el.boot.classList.add('hidden'), 850);
-  setTimeout(() => {
-    openApp(APPS.about, { x: 180, y: 96, width: 720, height: 500 });
-  }, 1050);
 }
 
 function logBoot(line) {
@@ -171,10 +170,18 @@ function titleFromIntent(intent) {
 }
 
 async function openApp(app, geometry = {}) {
+  const existing = findWindowByApp(app.appId);
+  if (existing) {
+    existing.element.classList.remove('minimized');
+    focusWindow(existing.element);
+    return;
+  }
+  if (restoreClosedSession(app.appId)) return;
+
   const localId = `win_${++state.counter}`;
   const win = createWindow(localId, app.title, geometry);
   setLoading(win, true);
-  setIframeHtml(win, loadingHtml(`Starting ${escapeHtml(app.title)} session...`), localId);
+  setIframeHtml(win, loadingHtml(`Starting ${escapeHtml(app.title)} session...`), localId, app.appId);
   focusWindow(win);
 
   try {
@@ -182,14 +189,10 @@ async function openApp(app, geometry = {}) {
       method: 'POST',
       body: JSON.stringify(app)
     });
-    win.dataset.sessionId = result.id;
-    win.dataset.appId = app.appId;
-    win.querySelector('.window-title').textContent = result.title || app.title;
-    setIframeHtml(win, result.html, result.id);
-    state.windows.set(result.id, { element: win, app, title: result.title || app.title });
+    attachSessionToWindow(win, app, result);
     toast(`${result.title || app.title} ready`);
   } catch (error) {
-    setIframeHtml(win, diagnosticHtml('Failed to start app', error.message), localId);
+    setIframeHtml(win, diagnosticHtml('Failed to start app', error.message), localId, app.appId);
     toast(error.message);
   } finally {
     setLoading(win, false);
@@ -248,14 +251,24 @@ function focusWindow(win) {
 
 function closeWindow(win) {
   const sessionId = win.dataset.sessionId;
-  if (sessionId) state.windows.delete(sessionId);
+  if (sessionId) {
+    const record = state.windows.get(sessionId);
+    if (record) {
+      record.geometry = geometryOf(win);
+      record.html = win.querySelector('iframe')?.srcdoc || '';
+      record.closedAt = Date.now();
+      state.closedSessions.set(sessionId, record);
+    }
+    state.windows.delete(sessionId);
+  }
   win.remove();
   el.activeTitle.textContent = 'VibeOS Desktop';
 }
 
 function minimizeWindow(win) {
-  win.classList.add('minimized');
-  setTimeout(() => win.classList.remove('minimized'), 500);
+  win.classList.toggle('minimized');
+  if (win.classList.contains('minimized')) el.activeTitle.textContent = 'VibeOS Desktop';
+  else focusWindow(win);
 }
 
 function toggleMaximize(win) {
@@ -317,12 +330,12 @@ function setLoading(win, loading) {
   win.querySelector('.window-spinner').classList.toggle('hidden', !loading);
 }
 
-function setIframeHtml(win, html, sessionId) {
+function setIframeHtml(win, html, sessionId, appId = win.dataset.appId || '') {
   const iframe = win.querySelector('iframe');
-  iframe.srcdoc = wrapIframeHtml(html, sessionId);
+  iframe.srcdoc = wrapIframeHtml(html, sessionId, appId);
 }
 
-function wrapIframeHtml(html, sessionId) {
+function wrapIframeHtml(html, sessionId, appId = '') {
   return `<!doctype html>
 <html>
 <head>
@@ -339,8 +352,8 @@ ${html || ''}
 <script>
 (() => {
   const sessionId = ${JSON.stringify(sessionId)};
-  const MAX_HTML = 14000;
-  const MAX_TEXT = 3000;
+  const appId = ${JSON.stringify(appId)};
+  const MAX_TEXT = 1200;
   const MAX_TRACE = 20;
 
   // ── Interaction Trace Ring Buffer ──
@@ -469,6 +482,29 @@ ${html || ''}
     return out;
   }
 
+  function summarizeDocument() {
+    const headings = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => (h.innerText || h.textContent || '').trim()).filter(Boolean).slice(0, 8);
+    const controls = Array.from(document.querySelectorAll('button,a,input,textarea,select,[role=\"button\"]')).map(el => selector(el)).filter(Boolean).slice(0, 24);
+    return { headings, controls };
+  }
+
+  function inferSemanticAction(eventType, target) {
+    const el = target && target.closest && target.closest('[data-vibe-action],button,a,input,textarea,select,[role=\"button\"],li,tr,label');
+    if (!el) return appId + '.' + eventType;
+    const explicit = el.getAttribute('data-vibe-action');
+    if (explicit) return explicit;
+    const label = (getAccessibleName(el) || el.name || el.id || el.textContent || '').toLowerCase();
+    if (appId === 'browser' && (label.includes('search') || label.includes('go') || label.includes('address'))) return 'browser.search';
+    if (appId === 'tasks' && eventType === 'submit') return 'task.add';
+    if (appId === 'tasks' && (el.matches('input[type=\"checkbox\"]') || label.includes('done'))) return 'task.toggle';
+    if (appId === 'notepad' && (label.includes('save') || eventType === 'submit')) return 'note.save';
+    if (appId === 'calculator') return 'calculator.input';
+    if (label.includes('retry')) return 'recovery.retry';
+    if (label.includes('simplify')) return 'recovery.simplify';
+    if (label.includes('reset')) return 'recovery.reset';
+    return appId + '.' + eventType;
+  }
+
   function emit(eventType, nativeEvent, extra = {}) {
     const target = nativeEvent && nativeEvent.target;
     const info = targetInfo(target);
@@ -485,13 +521,26 @@ ${html || ''}
         key: nativeEvent && nativeEvent.key || '',
         pointer: nativeEvent ? { x: nativeEvent.clientX || 0, y: nativeEvent.clientY || 0 } : {},
         documentText: clip(document.body.innerText || '', MAX_TEXT),
-        documentHtml: clip(document.body.innerHTML || '', MAX_HTML),
+        documentSummary: summarizeDocument(),
+        semanticAction: inferSemanticAction(eventType, target),
         viewport: { width: innerWidth, height: innerHeight },
         interactionTrace: getTrace(),
         ...extra
       }
     }, '*');
   }
+
+  // ── Host patch bridge ──
+  window.addEventListener('message', (message) => {
+    const data = message.data;
+    if (!data || data.type !== 'vibeos:patch' || !data.patch) return;
+    const patch = data.patch;
+    const target = document.querySelector(patch.selector || '');
+    if (!target) return;
+    if (patch.mode === 'replaceOuterHTML') target.outerHTML = patch.html || '';
+    else if (patch.mode === 'appendHTML') target.insertAdjacentHTML('beforeend', patch.html || '');
+    else target.innerHTML = patch.html || '';
+  });
 
   // ── Event Listeners ──
 
@@ -606,7 +655,19 @@ ${html || ''}
 async function handleIframeMessage(message) {
   const data = message.data;
   if (!data || data.type !== 'vibeos:event') return;
-  const sessionId = data.sessionId;
+  return enqueueSessionEvent(data.sessionId, data.event);
+}
+
+function enqueueSessionEvent(sessionId, event) {
+  const record = state.windows.get(sessionId);
+  if (!record) return Promise.resolve();
+  record.requestSeq = (record.requestSeq || 0) + 1;
+  const seq = record.requestSeq;
+  record.queue = (record.queue || Promise.resolve()).then(() => sendSessionEvent(sessionId, event, seq));
+  return record.queue.catch(() => {});
+}
+
+async function sendSessionEvent(sessionId, event, seq) {
   const record = state.windows.get(sessionId);
   if (!record) return;
   const win = record.element;
@@ -616,20 +677,84 @@ async function handleIframeMessage(message) {
   try {
     const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/event`, {
       method: 'POST',
-      body: JSON.stringify(data.event)
+      body: JSON.stringify(event)
     });
-    // silent=true means input_snapshot — don't replace iframe (user is still typing)
+    if (seq < (record.lastAppliedSeq || 0)) return;
+    record.lastAppliedSeq = seq;
     if (!result.silent) {
       win.querySelector('.window-title').textContent = result.title || record.title;
-      setIframeHtml(win, result.html, sessionId);
+      if (!result.patch || !applyPatch(win, result.patch)) setIframeHtml(win, result.html, sessionId, record.app?.appId);
       record.title = result.title || record.title;
     }
   } catch (error) {
     toast(error.message);
-    setIframeHtml(win, diagnosticHtml('LLM event failed', error.message), sessionId);
+    setIframeHtml(win, diagnosticHtml('LLM event failed', error.message), sessionId, record.app?.appId);
   } finally {
     setLoading(win, false);
   }
+}
+
+
+function attachSessionToWindow(win, app, result) {
+  win.dataset.sessionId = result.id;
+  win.dataset.appId = app.appId;
+  win.querySelector('.window-title').textContent = result.title || app.title;
+  setIframeHtml(win, result.html, result.id, app.appId);
+  state.windows.set(result.id, { element: win, app, title: result.title || app.title, requestSeq: 0, lastAppliedSeq: 0, queue: Promise.resolve() });
+}
+
+function findWindowByApp(appId) {
+  for (const record of state.windows.values()) {
+    if (record.app?.appId === appId) return record;
+  }
+  return null;
+}
+
+async function restoreClosedSession(appId) {
+  const entry = Array.from(state.closedSessions.entries()).reverse().find(([, record]) => record.app?.appId === appId);
+  if (!entry) return false;
+  const [sessionId, record] = entry;
+  state.closedSessions.delete(sessionId);
+  const win = createWindow(`win_${++state.counter}`, record.title || record.app.title, record.geometry || {});
+  try {
+    const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    attachSessionToWindow(win, record.app, result);
+    focusWindow(win);
+    toast(`${result.title || record.title} restored`);
+    return true;
+  } catch {
+    win.remove();
+    return false;
+  }
+}
+
+function geometryOf(win) {
+  return {
+    x: parseFloat(win.style.left) || 120,
+    y: parseFloat(win.style.top) || 64,
+    width: parseFloat(win.style.width) || defaultWidth(),
+    height: parseFloat(win.style.height) || defaultHeight()
+  };
+}
+
+function applyPatch(win, patch) {
+  if (!patch || !patch.selector || !patch.html) return false;
+  const iframe = win.querySelector('iframe');
+  try {
+    const doc = iframe?.contentDocument;
+    const target = doc?.querySelector(patch.selector);
+    if (target) {
+      if (patch.mode === 'replaceOuterHTML') target.outerHTML = patch.html;
+      else if (patch.mode === 'appendHTML') target.insertAdjacentHTML('beforeend', patch.html);
+      else target.innerHTML = patch.html;
+      return true;
+    }
+  } catch {}
+  if (iframe?.contentWindow) {
+    iframe.contentWindow.postMessage({ type: 'vibeos:patch', patch }, '*');
+    return true;
+  }
+  return false;
 }
 
 function loadingHtml(text) {
@@ -637,7 +762,7 @@ function loadingHtml(text) {
 }
 
 function diagnosticHtml(title, detail) {
-  return `<main style="font-family:Ubuntu,Segoe UI,sans-serif;background:#f6f5f4;height:100%;padding:24px"><section style="background:white;border-radius:18px;padding:20px;box-shadow:0 18px 50px #0002"><h1 style="color:#c01c28">${escapeHtml(title)}</h1><pre style="white-space:pre-wrap;background:#241f31;color:#fff;border-radius:12px;padding:14px">${escapeHtml(detail)}</pre></section></main>`;
+  return `<main style="font-family:Ubuntu,Segoe UI,sans-serif;background:#f6f5f4;height:100%;padding:24px"><section style="background:white;border-radius:18px;padding:20px;box-shadow:0 18px 50px #0002"><h1 style="color:#c01c28">${escapeHtml(title)}</h1><pre style="white-space:pre-wrap;background:#241f31;color:#fff;border-radius:12px;padding:14px">${escapeHtml(detail)}</pre><div style="display:flex;gap:10px;margin-top:14px"><button data-vibe-action="recovery.retry">Retry</button><button data-vibe-action="recovery.simplify">Simplify UI</button><button data-vibe-action="recovery.reset">Reset App</button></div></section></main>`;
 }
 
 async function api(path, options = {}) {

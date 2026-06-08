@@ -5,6 +5,15 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as logger from './logger.js';
 import {
+  appContractText,
+  getCachedInitialResult,
+  getStaticAppResult,
+  normalizeAppState,
+  selectThinkingLevel,
+  stateSchemaText,
+  storeCachedInitialResult
+} from './vibe-runtime.js';
+import {
   generateWithParseRetry,
   normalizeModelResult as normalizeModelResultRobust,
   timeoutForModel
@@ -206,7 +215,7 @@ function clip(value, max = 8000) {
 function systemPrompt() {
   return `You are the UI renderer for VibeOS, a desktop operating system. Each app is an isolated iframe session, and you generate the next UI from user events.
 
-You MUST return a strict JSON object with EXACTLY these 4 fields — no more, no less:
+You MUST return a strict JSON object with at least these 4 fields:
 {
   "title": "short window title",
   "html": "complete HTML fragment for the iframe body",
@@ -214,7 +223,12 @@ You MUST return a strict JSON object with EXACTLY these 4 fields — no more, no
   "narration": "one short internal note"
 }
 
-CRITICAL: Your response MUST contain the field "html" with the full HTML content. Do not omit it or use any other field name.
+You MAY also include a "patch" field when only a local region changed:
+{
+  "patch": { "selector": "#stable-element", "mode": "replaceInnerHTML", "html": "safe replacement HTML" }
+}
+
+CRITICAL: Your response MUST contain the field "html" with the full HTML content even when patch is present. Do not omit it or use any other field name.
 
 The "state" field is CRITICAL. It must be a valid JSON object that captures all mutable data of the app:
 - Calculator: current expression, display value, calculation history
@@ -248,7 +262,10 @@ App id: ${appId}
 Window title: ${title}
 User intent: ${intent || 'A useful desktop app.'}
 
-Make the UI complete enough for interaction. Include obvious controls the user can click or submit.
+${appContractText(appId)}
+${stateSchemaText(appId)}
+
+Make the UI complete enough for interaction. Include obvious controls the user can click or submit, and add stable data-vibe-action attributes for important controls such as browser.search, task.add, task.toggle, note.save, calculator.input, recovery.retry, recovery.simplify, and recovery.reset.
 
 CRITICAL: You must also define an initial "state" object that represents the app's starting data:
 - Calculator: { expression: "", result: "", history: [] }
@@ -270,6 +287,7 @@ function eventPrompt(session, event) {
   const role = target.role || '';
   const name = target.accessibleName || target.ariaLabel || target.name || '';
   const selector = event.clickedSelector || '';
+  const semanticAction = event.semanticAction || `${session.appId || 'custom'}.${event.eventType || 'event'}`;
   const allInputs = event.allInputs || (session.appState?._liveInputs) || {};
 
   // P0: Rich event descriptions for every event type
@@ -316,8 +334,12 @@ App context:
 - title: ${session.title || 'Vibe App'}
 - intent: ${session.intent || 'none'}
 
+${appContractText(session.appId || 'custom')}
+${stateSchemaText(session.appId || 'custom')}
+
 User action:
 ${actionDesc}
+Semantic action: ${semanticAction}
 
 Current application state (JSON):
 ${stateStr}
@@ -343,12 +365,22 @@ CRITICAL INSTRUCTIONS:
 4. STRUCTURE CONTRACT: Maintain the PREVIOUS PAGE STRUCTURE. Do NOT add/remove/reorder sections.
 5. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
 6. NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.
-7. Return strict JSON with title, html, state, and narration fields.`;
+7. Prefer a patch field for small localized updates: { selector, mode: "replaceInnerHTML", html }. Keep full html valid as fallback.
+8. Return strict JSON with title, html, state, narration, and optional patch fields.`;
 }
 
 async function generateInitialHtml(app) {
   const title = app.title || 'Vibe App';
-  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'init', aid: app.appId });
+  const staticResult = getStaticAppResult(app);
+  if (staticResult) return staticResult;
+  const provider = providerStatus();
+  const thinkingLevel = selectThinkingLevel({ appId: app.appId || 'custom', eventType: 'init', configured: CONFIG.thinkingLevel });
+  const cached = getCachedInitialResult(app, provider, thinkingLevel);
+  if (cached) {
+    logger.info('llm', { act: 'template_cache_hit', aid: app.appId || 'custom', thk: thinkingLevel });
+    return cached;
+  }
+  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: provider.model, typ: 'init', aid: app.appId, thk: thinkingLevel });
   const messages = [
     { role: 'system', content: systemPrompt() },
     { role: 'user', content: initialUserPrompt(app) }
@@ -356,7 +388,7 @@ async function generateInitialHtml(app) {
   try {
     let result = await generateWithParseRetry({
       messages,
-      callLlm: callConfiguredLlm,
+      callLlm: (nextMessages) => callConfiguredLlm(nextMessages, { thinkingLevel }),
       fallbackTitle: title,
       retryPrompt: 'Your previous response was not strict parseable JSON for the VibeOS renderer.',
       normalizeOptions: { logger, maxHtmlChars: CONFIG.maxHtmlChars }
@@ -368,8 +400,10 @@ async function generateInitialHtml(app) {
         ...messages,
         { role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' }
       ];
-      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages), title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
+      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages, { thinkingLevel }), title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
     }
+    result.state = normalizeAppState(app.appId || 'custom', {}, result.state);
+    storeCachedInitialResult(app, provider, thinkingLevel, result);
     t.stop({ ok: 1, hlen: result.html.length, prs: result.parseSource || '' });
     return result;
   } catch (e) {
@@ -379,7 +413,8 @@ async function generateInitialHtml(app) {
 }
 
 async function generateNextHtml(session, event) {
-  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'next', aid: session.appId, etp: event.eventType });
+  const thinkingLevel = selectThinkingLevel({ appId: session.appId || 'custom', eventType: event.eventType || 'event', configured: CONFIG.thinkingLevel });
+  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'next', aid: session.appId, etp: event.eventType, thk: thinkingLevel });
   const userMessage = { role: 'user', content: eventPrompt(session, event) };
   const messages = [
     { role: 'system', content: systemPrompt() },
@@ -389,7 +424,7 @@ async function generateNextHtml(session, event) {
   try {
     let result = await generateWithParseRetry({
       messages,
-      callLlm: callConfiguredLlm,
+      callLlm: (nextMessages) => callConfiguredLlm(nextMessages, { thinkingLevel }),
       fallbackTitle: session.title,
       retryPrompt: 'Your previous response was not strict parseable JSON for the VibeOS renderer.',
       normalizeOptions: { logger, maxHtmlChars: CONFIG.maxHtmlChars }
@@ -401,9 +436,10 @@ async function generateNextHtml(session, event) {
         ...messages,
         { role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' }
       ];
-      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages), session.title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
+      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages, { thinkingLevel }), session.title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
     }
-    session.appState = result.state;
+    session.appState = normalizeAppState(session.appId || 'custom', session.appState, result.state);
+    result.state = session.appState;
     session.messages.push(userMessage, { role: 'assistant', content: `Rendered "${result.title}". ${result.narration} State: ${JSON.stringify(result.state).slice(0, 800)}` });
     // P2: Preserve the first user message (initial intent) — only prune middle pairs
     while (session.messages.length > CONFIG.maxSessionMessages) {
@@ -424,9 +460,9 @@ async function generateNextHtml(session, event) {
   }
 }
 
-async function callConfiguredLlm(messages) {
-  if (CONFIG.provider === 'openai') return callOpenAi(messages);
-  if (CONFIG.provider === 'anthropic') return callAnthropic(messages);
+async function callConfiguredLlm(messages, options = {}) {
+  if (CONFIG.provider === 'openai') return callOpenAi(messages, options);
+  if (CONFIG.provider === 'anthropic') return callAnthropic(messages, options);
   throw new Error(`Unsupported LLM_PROVIDER: ${CONFIG.provider}`);
 }
 
@@ -440,8 +476,9 @@ async function withTimeout(promiseFactory, timeoutMs) {
   }
 }
 
-async function callOpenAi(messages) {
-  const t = logger.timer('llm', { prv: 'openai', mdl: CONFIG.openaiModel, thk: CONFIG.thinkingLevel });
+async function callOpenAi(messages, options = {}) {
+  const thinkingLevel = options.thinkingLevel || CONFIG.thinkingLevel;
+  const t = logger.timer('llm', { prv: 'openai', mdl: CONFIG.openaiModel, thk: thinkingLevel });
   const totalChars = messages.reduce((sum, m) => sum + String(m.content).length, 0);
   try {
     const result = await withTimeout(async (signal) => {
@@ -459,10 +496,10 @@ async function callOpenAi(messages) {
             temperature: 0.45,
             response_format: { type: 'json_object' }
           };
-          if (CONFIG.thinkingLevel !== 'off') {
+          if (thinkingLevel !== 'off') {
             payload.extra_body = {
               enable_thinking: true,
-              thinking_budget: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+              thinking_budget: THINKING_BUDGET_MAP[thinkingLevel] || 4096
             };
           }
           return payload;
@@ -472,7 +509,7 @@ async function callOpenAi(messages) {
       if (!resp.ok) throw new Error(`OpenAI-compatible API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return data.choices?.[0]?.message?.content || '';
-    }, timeoutForModel({ model: CONFIG.openaiModel, thinkingLevel: CONFIG.thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
+    }, timeoutForModel({ model: CONFIG.openaiModel, thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
     t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
     return result;
   } catch (e) {
@@ -481,8 +518,9 @@ async function callOpenAi(messages) {
   }
 }
 
-async function callAnthropic(messages) {
-  const t = logger.timer('llm', { prv: 'anthropic', mdl: CONFIG.anthropicModel, thk: CONFIG.thinkingLevel });
+async function callAnthropic(messages, options = {}) {
+  const thinkingLevel = options.thinkingLevel || CONFIG.thinkingLevel;
+  const t = logger.timer('llm', { prv: 'anthropic', mdl: CONFIG.anthropicModel, thk: thinkingLevel });
   const totalChars = messages.reduce((sum, m) => sum + String(m.content).length, 0);
   try {
     const result = await withTimeout(async (signal) => {
@@ -507,12 +545,12 @@ async function callAnthropic(messages) {
             system,
             messages: filtered
           };
-          if (CONFIG.thinkingLevel !== 'off') {
+          if (thinkingLevel !== 'off') {
             payload.thinking = {
               type: 'enabled',
-              budget_tokens: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+              budget_tokens: THINKING_BUDGET_MAP[thinkingLevel] || 4096
             };
-            payload.max_tokens = Math.max(payload.max_tokens, (THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096) + 1024);
+            payload.max_tokens = Math.max(payload.max_tokens, (THINKING_BUDGET_MAP[thinkingLevel] || 4096) + 1024);
           }
           return payload;
         })())
@@ -521,7 +559,7 @@ async function callAnthropic(messages) {
       if (!resp.ok) throw new Error(`Anthropic API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return (data.content || []).map(part => part.type === 'text' ? part.text : '').join('\n');
-    }, timeoutForModel({ model: CONFIG.anthropicModel, thinkingLevel: CONFIG.thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
+    }, timeoutForModel({ model: CONFIG.anthropicModel, thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
     t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
     return result;
   } catch (e) {
@@ -563,11 +601,17 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/sessions') {
     return send(res, 200, Array.from(sessions.values()).map(s => ({ id: s.id, appId: s.appId, title: s.title, intent: s.intent, updatedAt: s.updatedAt })));
   }
+  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (req.method === 'GET' && sessionMatch) {
+    const session = sessions.get(sessionMatch[1]);
+    if (!session) return send(res, 404, { error: 'session_not_found' });
+    return send(res, 200, { id: session.id, appId: session.appId, title: session.title, intent: session.intent, html: session.html, state: session.appState, provider: providerStatus() });
+  }
   if (req.method === 'POST' && url.pathname === '/api/sessions') {
     const payload = await readJson(req);
     const { session, result } = await createSession(payload);
     logs.push({ t: Date.now(), type: 'session:create', id: session.id, appId: session.appId });
-    return send(res, 200, { id: session.id, title: result.title, html: result.html, narration: result.narration, provider: providerStatus() });
+    return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
   }
   const eventMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/event$/);
   if (req.method === 'POST' && eventMatch) {
@@ -593,7 +637,7 @@ async function handleApi(req, res, url) {
     session.html = result.html;
     session.updatedAt = new Date().toISOString();
     logs.push({ t: Date.now(), type: 'session:event', id: session.id, appId: session.appId, eventType: event.eventType });
-    return send(res, 200, { id: session.id, title: result.title, html: result.html, narration: result.narration, provider: providerStatus() });
+    return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
   }
   if (req.method === 'GET' && url.pathname === '/api/logs') {
     return send(res, 200, logs.slice(-100));
