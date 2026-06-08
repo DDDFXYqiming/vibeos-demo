@@ -128,6 +128,45 @@ function id(prefix = 's') {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
 }
 
+function extractStyleBlock(html) {
+  const match = String(html || '').match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  return match ? match[1].trim() : '';
+}
+
+function extractStructureOutline(html) {
+  // Extract a skeleton of the DOM structure (tags + key attributes only, no text content)
+  const out = [];
+  const stack = [];
+  const tagRe = /<\/?([a-z0-9]+)([^>]*)>/gi;
+  let m;
+  while ((m = tagRe.exec(html)) !== null) {
+    const tag = m[1].toLowerCase();
+    const attrs = m[2];
+    const isClose = m[0].startsWith('</');
+    const isSelfClose = m[0].endsWith('/>') || ['br','hr','img','input','meta','link'].includes(tag);
+    if (isClose) {
+      if (stack.length > 0 && stack[stack.length - 1] === tag) stack.pop();
+      continue;
+    }
+    // Skip style/script content
+    if (tag === 'style' || tag === 'script') continue;
+    // Extract key structural attributes
+    const keyAttrs = [];
+    const idMatch = attrs.match(/\sid=["']([^"']+)["']/i);
+    if (idMatch) keyAttrs.push('#' + idMatch[1]);
+    const clsMatch = attrs.match(/\sclass=["']([^"']+)["']/i);
+    if (clsMatch) keyAttrs.push('.' + clsMatch[1].split(/\s+/).slice(0, 2).join('.'));
+    const nameMatch = attrs.match(/\sname=["']([^"']+)["']/i);
+    if (nameMatch) keyAttrs.push('@' + nameMatch[1]);
+    const indent = '  '.repeat(stack.length);
+    out.push(indent + '<' + tag + (keyAttrs.length ? ' ' + keyAttrs.join(' ') : '') + '>');
+    if (!isSelfClose) stack.push(tag);
+    // Prevent infinite stack growth on malformed HTML
+    if (stack.length > 50) break;
+  }
+  return out.slice(0, 60).join('\n');
+}
+
 function extractInteractiveTags(html) {
   const tags = [];
   const btnRe = /<button[^>]*>([\s\S]*?)<\/button>/gi;
@@ -308,6 +347,7 @@ CRITICAL: You must also define an initial "state" object that represents the app
 - Custom app: design an appropriate state structure
 
 The state must capture ALL data that the user can modify through interactions.
+Use a consistent visual style across all generated HTML: dark terminal apps should use a dark background (#1e1e2e or similar) with monospace fonts and syntax highlighting. Light apps should use clean white/light-gray backgrounds. All apps should feel like native Ubuntu desktop software.
 NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.`;
 }
 
@@ -351,7 +391,11 @@ function eventPrompt(session, event) {
   const stateStr = Object.keys(cleanState).length ? JSON.stringify(cleanState, null, 2) : '{}';
   const trace = event.interactionTrace || '';
 
-  // P1: Send trace + state + action, not full HTML dump
+  // Style preservation: extract CSS and structural skeleton from previous HTML
+  const prevStyle = extractStyleBlock(session.html || '');
+  const prevStructure = extractStructureOutline(session.html || '');
+
+  // P1: Send trace + state + action + style contract, not full HTML dump
   return `The user interacted with this VibeOS app. Generate the next HTML and updated state.
 
 App context:
@@ -369,6 +413,9 @@ ${trace ? `Recent user interaction trace (newest first):\n${trace}\n` : ''}
 Current form/input values snapshot:
 ${JSON.stringify(allInputs, null, 2).slice(0, 2000)}
 
+${prevStyle ? `PREVIOUS CSS STYLES (MUST reuse these exact styles in your <style> block — do NOT change colors, fonts, spacing, or layout):\n<style>\n${clip(prevStyle, 4000)}\n</style>\n` : ''}
+${prevStructure ? `PREVIOUS PAGE STRUCTURE (MUST maintain this exact DOM structure — only update content inside existing elements, do NOT add/remove/reorder major sections):\n${prevStructure}\n` : ''}
+
 CRITICAL INSTRUCTIONS:
 1. FIRST, update the "state" object based on the user's action:
    - Calculator: append digit/operator to expression, compute on =, clear on C
@@ -379,10 +426,11 @@ CRITICAL INSTRUCTIONS:
    - Files: update path, selected items
    - For input_snapshot: preserve all current input values in state, do NOT reset the page
 2. THEN, render HTML that reflects the UPDATED state. All input fields must retain their current values.
-3. Keep the UI layout and style consistent. Only modify what the action changes.
-4. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
-5. NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.
-6. Return strict JSON with title, html, state, and narration fields.`;
+3. STYLE CONTRACT: Reuse the PREVIOUS CSS STYLES exactly. Only change content, never the visual style.
+4. STRUCTURE CONTRACT: Maintain the PREVIOUS PAGE STRUCTURE. Do NOT add/remove/reorder sections.
+5. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
+6. NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.
+7. Return strict JSON with title, html, state, and narration fields.`;
 }
 
 async function generateInitialHtml(app) {
