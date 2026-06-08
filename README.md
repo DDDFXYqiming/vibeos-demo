@@ -2,6 +2,8 @@
 
 一个 Windows 原生可运行的"纯 LLM/Agent 运行时生成 UI"的软件形态。
 
+> **⚠️ 文档阅读注意**：本文档里所有的中文列表（包括「功能」「局限」「使用方式」「常见问题」里的条目，以及 *「• xxx」格式的小项*）都是**说明性文本**，不是 PowerShell 命令。请勿整段复制粘贴到 PowerShell，否则会出现 `•: The term '•' is not recognized`、中文行 `ParserError` 等误报，并可能进入「错误连成多行输入」的死循环。
+
 > 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Ubuntu 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。应用状态由服务端 session 管理，LLM 通过结构化 JSON 维护每个应用的内部数据。
 
 ## 实现要点
@@ -92,15 +94,33 @@ Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ### 重启
 
+最简单的方式：运行 `restart.ps1`（封装好了「停 → 等待 → 起」）。
+
 ```powershell
-# 先停止，再启动
-Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
-  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
-Start-Sleep -Seconds 1
-cd vibeos-demo; node src/server.js
+.\restart.ps1
 ```
 
-或重新运行 `.\start.ps1` / `start.cmd`。
+或只杀进程：
+
+```powershell
+.\stop.ps1
+```
+
+再启动：
+
+```powershell
+.\start.ps1
+```
+
+如果你想手动一行命令完成，先停、再启动（注意下面的命令是**两行分别执行**，不要一次性整段粘贴到 PowerShell，避免空行或中文注释触发多行输入）：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8765 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+```powershell
+node src/server.js
+```
 
 ## 配置 OpenAI / OpenAI-compatible
 
@@ -166,6 +186,8 @@ vibeos-demo/
   .env.example           配置模板
   start.ps1              Windows PowerShell 启动脚本
   start.cmd              Windows CMD 启动脚本
+  stop.ps1               杀掉占用 8765 端口的进程
+  restart.ps1            stop + start 的组合脚本
   package.json           项目元数据，无第三方依赖
   src/server.js          Node.js HTTP 服务、LLM provider、session runtime、状态管理
   src/logger.js          高熵 NDJSON 日志系统（hrtime 精度，自动清理）
