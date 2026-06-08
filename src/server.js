@@ -170,13 +170,47 @@ function stripUnsafeHtml(html) {
 
 function tryParseJson(text) {
   const raw = String(text || '').trim();
+  // Strip markdown fences if present
   const unfenced = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  try { return JSON.parse(unfenced); } catch {}
-  const first = unfenced.indexOf('{');
-  const last = unfenced.lastIndexOf('}');
-  if (first !== -1 && last !== -1 && last > first) {
-    try { return JSON.parse(unfenced.slice(first, last + 1)); } catch {}
+  // Attempt 1: parse the whole thing
+  try { return JSON.parse(unfenced); } catch (e1) {
+    // Log first attempt failure for debugging
+    if (unfenced.length > 100) {
+      logger.warn('llm', { act: 'json_parse_err', msg: e1.message?.slice(0, 100), len: unfenced.length, head: unfenced.slice(0, 60), tail: unfenced.slice(-60) });
+    }
   }
+  // Attempt 2: find outermost { } pair by brace counting (handles nested braces in HTML)
+  const first = unfenced.indexOf('{');
+  if (first !== -1) {
+    let depth = 0;
+    let inStr = false;
+    let escape = false;
+    for (let i = first; i < unfenced.length; i++) {
+      const ch = unfenced[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inStr) { escape = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === '{') depth++;
+      if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          const candidate = unfenced.slice(first, i + 1);
+          try { return JSON.parse(candidate); } catch (e2) {
+            logger.warn('llm', { act: 'json_parse_err2', msg: e2.message?.slice(0, 100), len: candidate.length });
+          }
+          break;
+        }
+      }
+    }
+  }
+  // Attempt 3: try fixing common LLM JSON issues (trailing comma, unescaped newlines in strings)
+  try {
+    const fixed = unfenced
+      .replace(/,\s*([}\]])/g, '$1')  // trailing commas
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');  // control chars
+    return JSON.parse(fixed);
+  } catch {}
   return null;
 }
 
