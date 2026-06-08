@@ -3,4 +3,6 @@ node_modules/
 .DS_Store
 *.log
 logs/
+temp_*.json
 .codegraph/
+*.zip

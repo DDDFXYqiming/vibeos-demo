@@ -4,6 +4,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as logger from './logger.js';
+import {
+  generateWithParseRetry,
+  normalizeModelResult as normalizeModelResultRobust,
+  timeoutForModel
+} from './model-output.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -197,98 +202,6 @@ function clip(value, max = 8000) {
   return str.length > max ? `${str.slice(0, max)}\n...[clipped ${str.length - max} chars]` : str;
 }
 
-function stripUnsafeHtml(html) {
-  let out = String(html || '');
-  out = out.replace(/<script[\s\S]*?<\/script>/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
-  out = out.replace(/javascript:/gi, '');
-  return out.slice(0, CONFIG.maxHtmlChars);
-}
-
-function tryParseJson(text) {
-  const raw = String(text || '').trim();
-  // Strip markdown fences if present
-  const unfenced = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  // Attempt 1: parse the whole thing
-  try { return JSON.parse(unfenced); } catch (e1) {
-    // Log first attempt failure for debugging
-    if (unfenced.length > 100) {
-      logger.warn('llm', { act: 'json_parse_err', msg: e1.message?.slice(0, 100), len: unfenced.length, head: unfenced.slice(0, 60), tail: unfenced.slice(-60) });
-    }
-  }
-  // Attempt 2: find outermost { } pair by brace counting (handles nested braces in HTML)
-  const first = unfenced.indexOf('{');
-  if (first !== -1) {
-    let depth = 0;
-    let inStr = false;
-    let escape = false;
-    for (let i = first; i < unfenced.length; i++) {
-      const ch = unfenced[i];
-      if (escape) { escape = false; continue; }
-      if (ch === '\\' && inStr) { escape = true; continue; }
-      if (ch === '"') { inStr = !inStr; continue; }
-      if (inStr) continue;
-      if (ch === '{') depth++;
-      if (ch === '}') {
-        depth--;
-        if (depth === 0) {
-          const candidate = unfenced.slice(first, i + 1);
-          try { return JSON.parse(candidate); } catch (e2) {
-            logger.warn('llm', { act: 'json_parse_err2', msg: e2.message?.slice(0, 100), len: candidate.length });
-          }
-          break;
-        }
-      }
-    }
-  }
-  // Attempt 3: try fixing common LLM JSON issues (trailing comma, unescaped newlines in strings)
-  try {
-    const fixed = unfenced
-      .replace(/,\s*([}\]])/g, '$1')  // trailing commas
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');  // control chars
-    return JSON.parse(fixed);
-  } catch {}
-  return null;
-}
-
-function normalizeModelResult(result, fallbackTitle = 'Vibe App') {
-  const parsed = typeof result === 'string' ? tryParseJson(result) : result;
-  if (!parsed || typeof parsed !== 'object') {
-    logger.warn('llm', { act: 'parse_fail', raw: clip(result, 300) });
-    return {
-      title: fallbackTitle,
-      html: fallbackHtml('Model returned non-JSON output', clip(result, 2500)),
-      state: {},
-      narration: 'The model response was not valid JSON, so VibeOS rendered it as diagnostic text.'
-    };
-  }
-  const state = parsed.state || {};
-  const html = parsed.html || '';
-  if (!html) {
-    logger.warn('llm', { act: 'empty_html', keys: Object.keys(parsed).join(','), narration: clip(parsed.narration || '', 100) });
-  }
-  return {
-    title: clip(parsed.title || fallbackTitle, 80),
-    html: stripUnsafeHtml(html || fallbackHtml('Empty response', 'The model returned no HTML.')),
-    state: typeof state === 'object' && !Array.isArray(state) ? state : {},
-    narration: clip(parsed.narration || parsed.explanation || '', 800)
-  };
-}
-
-function fallbackHtml(title, detail) {
-  return `<main class="app app-diagnostic"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p></main>`;
-}
-
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
 
 function systemPrompt() {
   return `You are the UI renderer for VibeOS, a desktop operating system. Each app is an isolated iframe session, and you generate the next UI from user events.
@@ -441,16 +354,23 @@ async function generateInitialHtml(app) {
     { role: 'user', content: initialUserPrompt(app) }
   ];
   try {
-    let raw = await callConfiguredLlm(messages);
-    let result = normalizeModelResult(raw, title);
-    // Retry once if LLM returned empty HTML
+    let result = await generateWithParseRetry({
+      messages,
+      callLlm: callConfiguredLlm,
+      fallbackTitle: title,
+      retryPrompt: 'Your previous response was not strict parseable JSON for the VibeOS renderer.',
+      normalizeOptions: { logger, maxHtmlChars: CONFIG.maxHtmlChars }
+    });
+    // Retry once more if LLM returned parseable JSON but omitted usable HTML.
     if (!result.html || result.html.includes('The model returned no HTML')) {
       logger.warn('llm', { act: 'retry_empty_html', aid: app.appId, typ: 'init' });
-      messages.push({ role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' });
-      raw = await callConfiguredLlm(messages);
-      result = normalizeModelResult(raw, title);
+      const retryMessages = [
+        ...messages,
+        { role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' }
+      ];
+      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages), title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
     }
-    t.stop({ ok: 1, hlen: result.html.length });
+    t.stop({ ok: 1, hlen: result.html.length, prs: result.parseSource || '' });
     return result;
   } catch (e) {
     t.stop({ ok: 0, err: e.message.slice(0, 80) });
@@ -467,14 +387,21 @@ async function generateNextHtml(session, event) {
     userMessage
   ];
   try {
-    let raw = await callConfiguredLlm(messages);
-    let result = normalizeModelResult(raw, session.title);
-    // Retry once if LLM returned empty HTML
+    let result = await generateWithParseRetry({
+      messages,
+      callLlm: callConfiguredLlm,
+      fallbackTitle: session.title,
+      retryPrompt: 'Your previous response was not strict parseable JSON for the VibeOS renderer.',
+      normalizeOptions: { logger, maxHtmlChars: CONFIG.maxHtmlChars }
+    });
+    // Retry once more if LLM returned parseable JSON but omitted usable HTML.
     if (!result.html || result.html.includes('The model returned no HTML')) {
       logger.warn('llm', { act: 'retry_empty_html', aid: session.appId, etp: event.eventType });
-      messages.push({ role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' });
-      raw = await callConfiguredLlm(messages);
-      result = normalizeModelResult(raw, session.title);
+      const retryMessages = [
+        ...messages,
+        { role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' }
+      ];
+      result = normalizeModelResultRobust(await callConfiguredLlm(retryMessages), session.title, { logger, maxHtmlChars: CONFIG.maxHtmlChars });
     }
     session.appState = result.state;
     session.messages.push(userMessage, { role: 'assistant', content: `Rendered "${result.title}". ${result.narration} State: ${JSON.stringify(result.state).slice(0, 800)}` });
@@ -489,7 +416,7 @@ async function generateNextHtml(session, event) {
         break;
       }
     }
-    t.stop({ ok: 1, hlen: result.html.length, mcnt: session.messages.length });
+    t.stop({ ok: 1, hlen: result.html.length, mcnt: session.messages.length, prs: result.parseSource || '' });
     return result;
   } catch (e) {
     t.stop({ ok: 0, err: e.message.slice(0, 80) });
@@ -545,7 +472,7 @@ async function callOpenAi(messages) {
       if (!resp.ok) throw new Error(`OpenAI-compatible API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return data.choices?.[0]?.message?.content || '';
-    }, CONFIG.timeoutMs);
+    }, timeoutForModel({ model: CONFIG.openaiModel, thinkingLevel: CONFIG.thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
     t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
     return result;
   } catch (e) {
@@ -594,7 +521,7 @@ async function callAnthropic(messages) {
       if (!resp.ok) throw new Error(`Anthropic API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return (data.content || []).map(part => part.type === 'text' ? part.text : '').join('\n');
-    }, CONFIG.timeoutMs);
+    }, timeoutForModel({ model: CONFIG.anthropicModel, thinkingLevel: CONFIG.thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
     t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
     return result;
   } catch (e) {
