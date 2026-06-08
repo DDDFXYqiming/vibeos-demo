@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import * as logger from './logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -285,36 +286,51 @@ async function generateInitialHtml(app) {
   if (CONFIG.provider === 'mock' || !providerStatus().ready) {
     return mockInitial(app);
   }
+  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'init', aid: app.appId });
   const messages = [
     { role: 'system', content: systemPrompt() },
     { role: 'user', content: initialUserPrompt(app) }
   ];
-  const raw = await callConfiguredLlm(messages);
-  return normalizeModelResult(raw, title);
+  try {
+    const raw = await callConfiguredLlm(messages);
+    const result = normalizeModelResult(raw, title);
+    t.stop({ ok: 1, hlen: result.html.length });
+    return result;
+  } catch (e) {
+    t.stop({ ok: 0, err: e.message.slice(0, 80) });
+    throw e;
+  }
 }
 
 async function generateNextHtml(session, event) {
   if (CONFIG.provider === 'mock' || !providerStatus().ready) {
     return mockNext(session, event);
   }
+  const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'next', aid: session.appId, etp: event.eventType });
   const userMessage = { role: 'user', content: eventPrompt(session, event) };
   const messages = [
     { role: 'system', content: systemPrompt() },
     ...session.messages.slice(-CONFIG.maxSessionMessages),
     userMessage
   ];
-  const raw = await callConfiguredLlm(messages);
-  const result = normalizeModelResult(raw, session.title);
-  session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
-  while (session.messages.length > CONFIG.maxSessionMessages) {
-    const first = session.messages[0];
-    if (first.role === 'user' && session.messages.length > 2 && session.messages[1].role === 'assistant') {
-      session.messages.splice(0, 2);
-    } else {
-      session.messages.shift();
+  try {
+    const raw = await callConfiguredLlm(messages);
+    const result = normalizeModelResult(raw, session.title);
+    session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
+    while (session.messages.length > CONFIG.maxSessionMessages) {
+      const first = session.messages[0];
+      if (first.role === 'user' && session.messages.length > 2 && session.messages[1].role === 'assistant') {
+        session.messages.splice(0, 2);
+      } else {
+        session.messages.shift();
+      }
     }
+    t.stop({ ok: 1, hlen: result.html.length, mcnt: session.messages.length });
+    return result;
+  } catch (e) {
+    t.stop({ ok: 0, err: e.message.slice(0, 80) });
+    throw e;
   }
-  return result;
 }
 
 async function callConfiguredLlm(messages) {
@@ -334,75 +350,93 @@ async function withTimeout(promiseFactory, timeoutMs) {
 }
 
 async function callOpenAi(messages) {
-  return withTimeout(async (signal) => {
-    const resp = await fetch(`${CONFIG.openaiBaseUrl}/chat/completions`, {
-      method: 'POST',
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        'authorization': `Bearer ${CONFIG.openaiApiKey}`
-      },
-      body: JSON.stringify((() => {
-        const payload = {
-          model: CONFIG.openaiModel,
-          messages,
-          temperature: 0.45,
-          response_format: { type: 'json_object' }
-        };
-        if (CONFIG.thinkingLevel !== 'off') {
-          payload.extra_body = {
-            enable_thinking: true,
-            thinking_budget: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+  const t = logger.timer('llm', { prv: 'openai', mdl: CONFIG.openaiModel, thk: CONFIG.thinkingLevel });
+  const totalChars = messages.reduce((sum, m) => sum + String(m.content).length, 0);
+  try {
+    const result = await withTimeout(async (signal) => {
+      const resp = await fetch(`${CONFIG.openaiBaseUrl}/chat/completions`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${CONFIG.openaiApiKey}`
+        },
+        body: JSON.stringify((() => {
+          const payload = {
+            model: CONFIG.openaiModel,
+            messages,
+            temperature: 0.45,
+            response_format: { type: 'json_object' }
           };
-        }
-        return payload;
-      })())
-    });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(`OpenAI-compatible API error ${resp.status}: ${clip(text, 1500)}`);
-    const data = JSON.parse(text);
-    return data.choices?.[0]?.message?.content || '';
-  }, CONFIG.timeoutMs);
+          if (CONFIG.thinkingLevel !== 'off') {
+            payload.extra_body = {
+              enable_thinking: true,
+              thinking_budget: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+            };
+          }
+          return payload;
+        })())
+      });
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`OpenAI-compatible API error ${resp.status}: ${clip(text, 1500)}`);
+      const data = JSON.parse(text);
+      return data.choices?.[0]?.message?.content || '';
+    }, CONFIG.timeoutMs);
+    t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
+    return result;
+  } catch (e) {
+    t.stop({ tin: logger.estTok(totalChars), ok: 0, err: e.message.slice(0, 80) });
+    throw e;
+  }
 }
 
 async function callAnthropic(messages) {
-  return withTimeout(async (signal) => {
-    const system = messages.find(m => m.role === 'system')?.content || systemPrompt();
-    const filtered = messages.filter(m => m.role !== 'system').map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content
-    }));
-    const resp = await fetch(`${CONFIG.anthropicBaseUrl}/v1/messages`, {
-      method: 'POST',
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': CONFIG.anthropicApiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify((() => {
-        const payload = {
-          model: CONFIG.anthropicModel,
-          max_tokens: 4096,
-          temperature: 0.45,
-          system,
-          messages: filtered
-        };
-        if (CONFIG.thinkingLevel !== 'off') {
-          payload.thinking = {
-            type: 'enabled',
-            budget_tokens: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+  const t = logger.timer('llm', { prv: 'anthropic', mdl: CONFIG.anthropicModel, thk: CONFIG.thinkingLevel });
+  const totalChars = messages.reduce((sum, m) => sum + String(m.content).length, 0);
+  try {
+    const result = await withTimeout(async (signal) => {
+      const system = messages.find(m => m.role === 'system')?.content || systemPrompt();
+      const filtered = messages.filter(m => m.role !== 'system').map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content
+      }));
+      const resp = await fetch(`${CONFIG.anthropicBaseUrl}/v1/messages`, {
+        method: 'POST',
+        signal,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': CONFIG.anthropicApiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify((() => {
+          const payload = {
+            model: CONFIG.anthropicModel,
+            max_tokens: 4096,
+            temperature: 0.45,
+            system,
+            messages: filtered
           };
-          payload.max_tokens = Math.max(payload.max_tokens, (THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096) + 1024);
-        }
-        return payload;
-      })())
-    });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(`Anthropic API error ${resp.status}: ${clip(text, 1500)}`);
-    const data = JSON.parse(text);
-    return (data.content || []).map(part => part.type === 'text' ? part.text : '').join('\n');
-  }, CONFIG.timeoutMs);
+          if (CONFIG.thinkingLevel !== 'off') {
+            payload.thinking = {
+              type: 'enabled',
+              budget_tokens: THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096
+            };
+            payload.max_tokens = Math.max(payload.max_tokens, (THINKING_BUDGET_MAP[CONFIG.thinkingLevel] || 4096) + 1024);
+          }
+          return payload;
+        })())
+      });
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`Anthropic API error ${resp.status}: ${clip(text, 1500)}`);
+      const data = JSON.parse(text);
+      return (data.content || []).map(part => part.type === 'text' ? part.text : '').join('\n');
+    }, CONFIG.timeoutMs);
+    t.stop({ tin: logger.estTok(totalChars), tou: logger.estTok(result), ok: 1 });
+    return result;
+  } catch (e) {
+    t.stop({ tin: logger.estTok(totalChars), ok: 0, err: e.message.slice(0, 80) });
+    throw e;
+  }
 }
 
 function mockInitial(app) {
@@ -618,6 +652,7 @@ async function createSession(payload) {
   session.messages.push({ role: 'user', content: initialUserPrompt(payload) });
   session.messages.push({ role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
   sessions.set(session.id, session);
+  logger.info('sess', { act: 'create', sid: session.id, aid: session.appId, cnt: sessions.size });
   return { session, result };
 }
 
@@ -640,8 +675,12 @@ async function handleApi(req, res, url) {
   const eventMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/event$/);
   if (req.method === 'POST' && eventMatch) {
     const session = sessions.get(eventMatch[1]);
-    if (!session) return send(res, 404, { error: 'session_not_found' });
+    if (!session) {
+      logger.warn('evt', { act: 'drop', sid: eventMatch[1], why: 'session_not_found' });
+      return send(res, 404, { error: 'session_not_found' });
+    }
     const event = await readJson(req);
+    logger.perf('evt', { etp: event.eventType, aid: session.appId, sid: session.id, sel: event.clickedSelector?.slice(0, 40) || '' });
     const result = await generateNextHtml(session, event);
     session.title = result.title || session.title;
     session.html = result.html;
@@ -674,11 +713,19 @@ function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const t = logger.timer('http', { m: req.method, p: url.pathname });
   try {
-    if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
-    return serveStatic(req, res, url);
+    if (url.pathname.startsWith('/api/')) {
+      const result = await handleApi(req, res, url);
+      t.stop({ st: res.statusCode || 200 });
+      return result;
+    }
+    const result = serveStatic(req, res, url);
+    t.stop({ st: res.statusCode || 200 });
+    return result;
   } catch (error) {
     const status = error.status || (error.name === 'AbortError' ? 504 : 500);
+    t.stop({ st: status, err: error.message.slice(0, 60) });
     send(res, status, { error: error.name || 'error', message: error.message || String(error) });
   }
 });
@@ -689,4 +736,14 @@ server.listen(CONFIG.port, '127.0.0.1', () => {
   console.log(`LLM_PROVIDER=${status.provider}; model=${status.model}; ready=${status.ready}`);
   if (!status.ready) console.log('Provider selected but API key is missing. Edit .env or use LLM_PROVIDER=mock.');
   console.log('No local OS commands are executed by this demo.');
+  logger.info('sys', { act: 'start', port: CONFIG.port, prv: status.provider, mdl: status.model, ready: status.ready });
+
+  // Periodic system stats every 60s
+  setInterval(() => {
+    const memMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024 * 10) / 10;
+    logger.info('sys', { act: 'tick', mem: memMB, sess: sessions.size });
+  }, 60000);
+
+  // Daily log cleanup
+  setInterval(() => logger.cleanup(), 86400000);
 });
