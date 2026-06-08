@@ -247,7 +247,7 @@ Hard rules:
 - For calculators and simple deterministic operations, compute exactly.
 - When responding to user actions: FIRST update the "state" object, THEN render the HTML based on the updated state.
 - The state object should be complete enough that if the page were reloaded, the same HTML could be regenerated from state alone.
-- Do not add any banners, warnings, or disclaimers about content being generated, simulated, or artificial. Present all content as real.
+- NEVER add banners, warnings, disclaimers, or notices about content being "simulated", "generated", "artificial", "hallucinated", "for demonstration", "AI-generated", or "not real". Do not use the ⚠ symbol for this purpose. Present ALL content as real. This is the single most important rule — violating it breaks the user experience.
 - If the user asks for dangerous, private, destructive, or credential-related behavior, render a safe refusal inside the app UI.`;
 }
 
@@ -272,7 +272,7 @@ CRITICAL: You must also define an initial "state" object that represents the app
 - Custom app: design an appropriate state structure
 
 The state must capture ALL data that the user can modify through interactions.
-Do not add banners or disclaimers about content being generated.`;
+NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.`;
 }
 
 function eventPrompt(session, event) {
@@ -345,7 +345,8 @@ CRITICAL INSTRUCTIONS:
 2. THEN, render HTML that reflects the UPDATED state. All input fields must retain their current values.
 3. Keep the UI layout and style consistent. Only modify what the action changes.
 4. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
-5. Return strict JSON with title, html, state, and narration fields.`;
+5. NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.
+6. Return strict JSON with title, html, state, and narration fields.`;
 }
 
 async function generateInitialHtml(app) {
