@@ -22,7 +22,7 @@ test('README recommends the new restart and stop helper scripts', () => {
 });
 
 test('standalone restart script kills the existing listener and starts a fresh server', () => {
-  assert.match(restart, /Stop-Process -Id \$_\.OwningProcess/);
+  assert.match(restart, /Stop-Process -Id \$conn\.OwningProcess/);
   assert.match(restart, /Start-Sleep -Seconds 1/);
   assert.match(restart, /node src\/server\.js/);
   assert.match(restart, /Script must be run from the vibeos-demo project root/);
@@ -30,5 +30,5 @@ test('standalone restart script kills the existing listener and starts a fresh s
 
 test('standalone stop script targets only the VibeOS node listener on port 8765', () => {
   assert.match(stop, /Get-NetTCPConnection -LocalPort 8765/);
-  assert.match(stop, /Stop-Process -Id \$_\.OwningProcess -Force/);
+  assert.match(stop, /Stop-Process -Id \$conn\.OwningProcess/);
 });
