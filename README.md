@@ -1,8 +1,8 @@
 # VibeOS Demo
 
-一个 Windows 原生可运行的“纯 LLM/Agent 运行时生成 UI”的软件形态。
+一个 Windows 原生可运行的"纯 LLM/Agent 运行时生成 UI"的软件形态。
 
-> 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Ubuntu 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。
+> 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Ubuntu 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。应用状态由服务端 session 管理，LLM 通过结构化 JSON 维护每个应用的内部数据。
 
 ## 实现要点
 
@@ -19,9 +19,9 @@ iframe 捕获 click / submit / enter / change
         ↓
 POST /api/sessions/:id/event
         ↓
-独立 LLM session 生成下一版 HTML fragment
+LLM 生成下一版 HTML + 结构化 state
         ↓
-替换 iframe srcdoc
+替换 iframe srcdoc，state 写回 session
 ```
 
 ## 功能
@@ -30,8 +30,9 @@ POST /api/sessions/:id/event
 - 每个应用独立 session：Browser、Terminal、Calculator、Files、Text Editor、Tasks、Settings、Vibe Prompt、About。
 - iframe 事件桥：自动捕获按钮点击、表单提交、输入框 Enter、select/checkbox/radio/range 变化。
 - LLM 后端：支持 OpenAI / OpenAI-compatible / Anthropic。
+- 多级思考控制：`LLM_THINKING_LEVEL` 支持 off / low / medium / high / max。
 - 安全边界：不执行本地命令；服务端会移除模型返回的 `<script>` 和 inline event handlers；iframe 使用 sandbox。
-- Windows 原生：无 Docker、无 WSL、无数据库、无 npm 依赖。
+- Windows 原生：无 Docker、无 WSL、无数据库、无第三方 npm 依赖。
 
 ## 环境要求
 
@@ -45,9 +46,9 @@ POST /api/sessions/:id/event
 node -v
 ```
 
-## 快速启动
+## 服务管理
 
-PowerShell：
+### 启动
 
 ```powershell
 cd vibeos-demo
@@ -61,6 +62,13 @@ cd vibeos-demo
 start.cmd
 ```
 
+也可以直接用 Node 启动：
+
+```powershell
+cd vibeos-demo
+node src/server.js
+```
+
 启动后打开：
 
 ```text
@@ -68,6 +76,29 @@ http://127.0.0.1:8765
 ```
 
 首次启动会自动从 `.env.example` 复制 `.env`。
+
+### 停止
+
+```powershell
+# 方法 1：在运行服务的终端按 Ctrl+C
+
+# 方法 2：查找并杀掉占用 8765 端口的进程
+Get-NetTCPConnection -LocalPort 8765 | Stop-Process -Force
+
+# 方法 3：杀掉所有 Node 进程（慎用）
+Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+### 重启
+
+```powershell
+# 先停止，再启动
+Get-NetTCPConnection -LocalPort 8765 | Stop-Process -Force
+Start-Sleep -Seconds 1
+cd vibeos-demo; node src/server.js
+```
+
+或重新运行 `.\start.ps1` / `start.cmd`。
 
 ## 配置 OpenAI / OpenAI-compatible
 
@@ -114,6 +145,7 @@ LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-3-5-sonnet-latest
 ANTHROPIC_BASE_URL=https://api.anthropic.com
+LLM_THINKING_LEVEL=off
 ```
 
 ## 使用方式
@@ -122,21 +154,37 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com
 - 点击顶部 `Activities` 查看应用网格。
 - 在桌面输入框里描述一个应用，即可创建新应用。
 
-配置真实 LLM 后，会生成一个临时应用窗口。之后每次点击/提交都会让同一个 session 继续生成下一版界面。
+配置真实 LLM 后，会生成一个临时应用窗口。每次点击/提交都会让同一个 session 继续生成下一版界面，应用状态在 session 内持续累积。
 
 ## 关键文件
 
 ```text
 vibeos-demo/
+  .env                   本地配置（不入库）
+  .env.example           配置模板
   start.ps1              Windows PowerShell 启动脚本
   start.cmd              Windows CMD 启动脚本
-  .env.example           配置模板
   package.json           项目元数据，无第三方依赖
-  src/server.js          Node.js HTTP 服务、LLM provider、session runtime
+  src/server.js          Node.js HTTP 服务、LLM provider、session runtime、状态管理
+  src/logger.js          高熵 NDJSON 日志系统（hrtime 精度，自动清理）
   public/index.html      桌面 shell HTML
   public/styles.css      Ubuntu 风格桌面和窗口样式
   public/app.js          窗口管理器、iframe bridge、前端 runtime
 ```
+
+## 日志
+
+服务运行时会在 `logs/` 目录生成结构化 NDJSON 日志（`app.log`），包含：
+
+| 类别 | 说明 |
+|---|---|
+| `sys` | 服务启停、定时心跳、内存用量 |
+| `http` | HTTP 请求耗时 |
+| `llm` | LLM 调用耗时、token 估算、思考等级、错误 |
+| `evt` | 前端事件类型、目标元素、session 匹配 |
+| `sess` | Session 创建/销毁 |
+
+日志自动清理 7 天前的旧文件。
 
 ## 安全说明
 
@@ -170,6 +218,10 @@ vibeos-demo/
 
 iframe 事件回传。前端会自动发送，通常不需要手写。
 
+### `GET /api/health`
+
+健康检查，返回服务状态和当前 session 数量。
+
 ## 常见问题
 
 ### 1. 启动之后无法交互？
@@ -181,7 +233,7 @@ LLM_PROVIDER=openai
 OPENAI_API_KEY=...
 ```
 
-改完后重启 `start.ps1`。
+改完后重启服务。
 
 ### 2. OpenAI-compatible 返回格式异常？
 
@@ -196,7 +248,7 @@ response_format: { "type": "json_object" }
 
 ### 3. 为什么不让 LLM 执行本地命令？
 
-因为这个 demo 的目标是复现“幻觉 UI runtime”，不是做 agent shell。执行本地命令会引入高风险权限边界问题。本项目除了llm幻觉以外什么都没有。
+因为这个 demo 的目标是复现"幻觉 UI runtime"，不是做 agent shell。执行本地命令会引入高风险权限边界问题。本项目除了 LLM 幻觉以外什么都没有。
 
 ## 局限
 
