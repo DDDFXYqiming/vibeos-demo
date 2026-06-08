@@ -82,8 +82,9 @@ http://127.0.0.1:8765
 ```powershell
 # 方法 1：在运行服务的终端按 Ctrl+C
 
-# 方法 2：查找并杀掉占用 8765 端口的进程
-Get-NetTCPConnection -LocalPort 8765 | Stop-Process -Force
+# 方法 2：杀掉占用 8765 端口的进程
+Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
+  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 
 # 方法 3：杀掉所有 Node 进程（慎用）
 Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -93,7 +94,8 @@ Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ```powershell
 # 先停止，再启动
-Get-NetTCPConnection -LocalPort 8765 | Stop-Process -Force
+Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
+  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 Start-Sleep -Seconds 1
 cd vibeos-demo; node src/server.js
 ```
