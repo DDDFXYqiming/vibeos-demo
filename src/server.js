@@ -14,7 +14,7 @@ loadEnv(path.join(ROOT, '.env'));
 
 const CONFIG = {
   port: readInt(process.env.PORT, 8765),
-  provider: (process.env.LLM_PROVIDER || 'mock').trim().toLowerCase(),
+  provider: (process.env.LLM_PROVIDER || 'openai').trim().toLowerCase(),
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   openaiBaseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
   openaiModel: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
@@ -108,10 +108,9 @@ async function readJson(req) {
 
 function providerStatus() {
   const provider = CONFIG.provider;
-  const ready = provider === 'mock' ||
-    (provider === 'openai' && Boolean(CONFIG.openaiApiKey)) ||
+  const ready = (provider === 'openai' && Boolean(CONFIG.openaiApiKey)) ||
     (provider === 'anthropic' && Boolean(CONFIG.anthropicApiKey));
-  const model = provider === 'anthropic' ? CONFIG.anthropicModel : provider === 'openai' ? CONFIG.openaiModel : 'deterministic-mock';
+  const model = provider === 'anthropic' ? CONFIG.anthropicModel : CONFIG.openaiModel;
   return { provider, model, ready, allowLocalTools: CONFIG.allowLocalTools };
 }
 
@@ -121,7 +120,7 @@ function clientConfig() {
     ...status,
     port: CONFIG.port,
     mode: status.ready ? 'ready' : 'missing_key',
-    note: status.ready ? 'runtime ready' : 'provider selected but API key missing; set .env or switch LLM_PROVIDER=mock'
+    note: status.ready ? 'runtime ready' : 'provider selected but API key missing; set .env'
   };
 }
 
@@ -187,12 +186,15 @@ function normalizeModelResult(result, fallbackTitle = 'Vibe App') {
     return {
       title: fallbackTitle,
       html: fallbackHtml('Model returned non-JSON output', clip(result, 2500)),
+      state: {},
       narration: 'The model response was not valid JSON, so VibeOS rendered it as diagnostic text.'
     };
   }
+  const state = parsed.state || {};
   return {
     title: clip(parsed.title || fallbackTitle, 80),
     html: stripUnsafeHtml(parsed.html || fallbackHtml('Empty response', 'The model returned no HTML.')),
+    state: typeof state === 'object' && !Array.isArray(state) ? state : {},
     narration: clip(parsed.narration || parsed.explanation || '', 800)
   };
 }
@@ -217,8 +219,18 @@ Return ONLY a strict JSON object with exactly these fields:
 {
   "title": "short window title",
   "html": "complete HTML fragment for the iframe body; no <html>, no <body>, no <script>",
+  "state": { "arbitrary": "JSON object representing the app's internal state" },
   "narration": "one short internal note"
 }
+
+The "state" field is CRITICAL. It must be a valid JSON object that captures all mutable data of the app:
+- Calculator: current expression, display value, calculation history
+- Terminal: command history array [{cmd, output}]
+- Browser: current URL, search query, page content data
+- Files: current directory, selected items
+- Tasks: task list array [{text, done}]
+- Notepad: document text, title
+- Custom apps: whatever data the app needs to function
 
 Hard rules:
 - Do not emit markdown fences.
@@ -228,6 +240,8 @@ Hard rules:
 - Keep the UI self-contained and visually close to Ubuntu/Yaru style: aubergine, orange accents, rounded panels, clean sans-serif typography.
 - Keep continuity from the previous HTML/state. Do not reset the app unless requested.
 - For calculators and simple deterministic operations, compute exactly.
+- When responding to user actions: FIRST update the "state" object, THEN render the HTML based on the updated state.
+- The state object should be complete enough that if the page were reloaded, the same HTML could be regenerated from state alone.
 - Do not add any banners, warnings, or disclaimers about content being generated, simulated, or artificial. Present all content as real.
 - If the user asks for dangerous, private, destructive, or credential-related behavior, render a safe refusal inside the app UI.`;
 }
@@ -241,7 +255,19 @@ App id: ${appId}
 Window title: ${title}
 User intent: ${intent || 'A useful desktop app.'}
 
-Make the UI complete enough for interaction. Include obvious controls the user can click or submit. Do not add banners or disclaimers about content being generated.`;
+Make the UI complete enough for interaction. Include obvious controls the user can click or submit.
+
+CRITICAL: You must also define an initial "state" object that represents the app's starting data:
+- Calculator: { expression: "", result: "", history: [] }
+- Terminal: { history: [] }
+- Browser: { url: "", query: "", bookmarks: [] }
+- Files: { path: "/home/user", selected: [] }
+- Tasks: { tasks: [] }
+- Notepad: { text: "", title: "Untitled" }
+- Custom app: design an appropriate state structure
+
+The state must capture ALL data that the user can modify through interactions.
+Do not add banners or disclaimers about content being generated.`;
 }
 
 function eventPrompt(session, event) {
@@ -254,7 +280,8 @@ function eventPrompt(session, event) {
     ? `Pressed Enter in ${target.tag || 'input'} with value "${clip(target.value || '', 200)}"`
     : `Event: ${event.eventType}`;
   const currentButtons = extractInteractiveTags(session.html || '');
-  return `The user interacted with this VibeOS iframe app. Generate the next full HTML fragment.
+  const stateStr = session.appState ? JSON.stringify(session.appState, null, 2) : '{}';
+  return `The user interacted with this VibeOS app. Generate the next full HTML fragment and updated state.
 
 App context:
 - appId: ${session.appId || 'custom'}
@@ -264,28 +291,30 @@ App context:
 User action:
 ${actionDesc}
 
+Current application state (JSON):
+${stateStr}
+
 Current interactive elements on the page:
 ${currentButtons.slice(0, 30).join('\n')}${currentButtons.length > 30 ? '\n...' : ''}
 
 Previous HTML:
 ${clip(session.html || '', 12000)}
 
-IMPORTANT RULES:
-1. Keep the UI layout, style, and all existing elements as close to the Previous HTML as possible.
-2. ONLY modify the part of the UI that should change as a result of this user action.
-3. Preserve all user-entered values, form data, and visible state unless the action explicitly changes them.
-4. If a button was clicked, perform the action that button is supposed to do (e.g., search, calculate, navigate, add item).
-5. For calculators: compute the exact result and update the display.
-6. For browsers/search: update the content area with relevant results, keep the address bar and search box.
-7. For terminals: append the command and its output to the terminal history.
-8. Return strict JSON with title, html, and narration fields only.`;
+CRITICAL INSTRUCTIONS:
+1. FIRST, update the "state" object based on the user's action:
+   - Calculator: append digit/operator to expression, compute on =, clear on C
+   - Terminal: append {cmd, output} to history array
+   - Browser: update url/query, generate results content
+   - Tasks: add new task to tasks array, toggle done status
+   - Notepad: update text/title from form data
+   - Files: update path, selected items
+2. THEN, render HTML that reflects the UPDATED state. The HTML input fields must show the new state values.
+3. Keep the UI layout and style consistent. Only modify what the action changes.
+4. Return strict JSON with title, html, state, and narration fields.`;
 }
 
 async function generateInitialHtml(app) {
   const title = app.title || 'Vibe App';
-  if (CONFIG.provider === 'mock' || !providerStatus().ready) {
-    return mockInitial(app);
-  }
   const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'init', aid: app.appId });
   const messages = [
     { role: 'system', content: systemPrompt() },
@@ -303,9 +332,6 @@ async function generateInitialHtml(app) {
 }
 
 async function generateNextHtml(session, event) {
-  if (CONFIG.provider === 'mock' || !providerStatus().ready) {
-    return mockNext(session, event);
-  }
   const t = logger.timer('llm', { prv: CONFIG.provider, mdl: providerStatus().model, typ: 'next', aid: session.appId, etp: event.eventType });
   const userMessage = { role: 'user', content: eventPrompt(session, event) };
   const messages = [
@@ -316,6 +342,7 @@ async function generateNextHtml(session, event) {
   try {
     const raw = await callConfiguredLlm(messages);
     const result = normalizeModelResult(raw, session.title);
+    session.appState = result.state;
     session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
     while (session.messages.length > CONFIG.maxSessionMessages) {
       const first = session.messages[0];
@@ -439,201 +466,6 @@ async function callAnthropic(messages) {
   }
 }
 
-function mockInitial(app) {
-  const appId = app.appId || 'custom';
-  const title = app.title || appId;
-  const intent = app.intent || '';
-  const map = {
-    calculator: mockCalculator(''),
-    browser: mockBrowser('', 'home'),
-    terminal: mockTerminal([]),
-    notepad: mockNotepad('', 'Untitled note'),
-    files: mockFiles(),
-    settings: mockSettings(),
-    tasks: mockTasks(),
-    about: mockAbout(),
-    prompt: mockPrompt(),
-    custom: mockCustom(title, intent)
-  };
-  return normalizeModelResult(map[appId] || mockCustom(title, intent), title);
-}
-
-function mockNext(session, event) {
-  const appId = session.appId;
-  const form = event.formData || {};
-  const value = event.value || event.text || '';
-  if (appId === 'calculator') return normalizeModelResult(mockCalculator(calcExpressionFromEvent(event)), 'Calculator');
-  if (appId === 'browser') return normalizeModelResult(mockBrowser(form.q || form.url || value || 'Ubuntu VibeOS', 'results'), 'Vibe Browser');
-  if (appId === 'terminal') return normalizeModelResult(mockTerminal(updateTerminalHistory(session, event)), 'Terminal');
-  if (appId === 'notepad') return normalizeModelResult(mockNotepad(form.note || event.allInputs?.note || value || '', form.title || 'Untitled note'), 'Text Editor');
-  if (appId === 'settings') return normalizeModelResult(mockSettings(value), 'Settings');
-  if (appId === 'tasks') return normalizeModelResult(mockTasks(form.task || value), 'Tasks');
-  if (appId === 'prompt') return normalizeModelResult(mockPrompt(form.intent || value), 'Vibe Prompt');
-  return normalizeModelResult(mockCustom(session.title, `Interaction: ${event.eventType} ${value}`), session.title);
-}
-
-function calcExpressionFromEvent(event) {
-  const form = event.formData || {};
-  const current = form.expression || event.allInputs?.expression || '';
-  const text = event.text || event.value || '';
-  if (['=', 'Enter'].includes(text)) return current;
-  if (text === 'C' || text === 'Clear') return '';
-  if (text === '⌫') return current.slice(0, -1);
-  if (/^[0-9.+\-*/()%]$/.test(text)) return current + text;
-  return current || text;
-}
-
-function safeEvalExpression(expression) {
-  const expr = String(expression || '').replace(/×/g, '*').replace(/÷/g, '/').trim();
-  if (!expr) return '';
-  if (!/^[0-9+\-*/().%\s]+$/.test(expr)) return 'Invalid expression';
-  try {
-    // eslint-disable-next-line no-new-func
-    const value = Function(`"use strict"; return (${expr})`)();
-    if (!Number.isFinite(value)) return String(value);
-    return Number(value.toFixed(12)).toString();
-  } catch {
-    return 'Syntax error';
-  }
-}
-
-function mockCalculator(expression) {
-  const result = safeEvalExpression(expression);
-  const buttons = ['7','8','9','/','4','5','6','*','1','2','3','-','0','.','=','+','C','⌫','(',')'];
-  return {
-    title: 'Calculator',
-    html: `<style>
-      .calc{height:100%;display:grid;place-items:center;background:linear-gradient(135deg,#2c001e,#77216f);color:#fff;font-family:Ubuntu,Segoe UI,sans-serif}.panel{width:min(340px,92%);background:#241f31;border-radius:18px;padding:18px;box-shadow:0 24px 60px #0007}.display{background:#111;border-radius:12px;padding:14px;margin-bottom:14px}.display input{width:100%;font-size:28px;background:transparent;border:0;color:#fff;outline:0;text-align:right}.result{text-align:right;color:#f6a25b;min-height:24px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.keys button{border:0;border-radius:12px;padding:14px;font-size:18px;background:#3d3846;color:#fff}.keys button:hover{background:#e95420}</style>
-      <main class="calc"><form class="panel"><div class="display"><input name="expression" value="${escapeHtml(expression)}" placeholder="0" autofocus><div class="result">${escapeHtml(result)}</div></div><div class="keys">${buttons.map(b => `<button type="submit" name="key" value="${escapeHtml(b)}">${escapeHtml(b)}</button>`).join('')}</div></form></main>`,
-    narration: 'mock calculator rendered'
-  };
-}
-
-function mockBrowser(query, mode) {
-  const q = query || '';
-  const content = mode === 'results' && q ? `
-    <section class="notice">Simulated results generated locally. This demo is not browsing the real web.</section>
-    <article><h2>${escapeHtml(q)} — simulated overview</h2><p>This hallucinated page demonstrates how a VibeOS-style app can create plausible interface states from intent. Treat all content here as fictional unless you provided it.</p></article>
-    <article><h3>Result 1: Ubuntu-style generative desktop</h3><p>A fake result describing a local iframe-based operating environment where each app has its own model session.</p></article>
-    <article><h3>Result 2: Agent-driven UI pattern</h3><p>The runtime captures clicks and form submissions, sends event context to a model, and replaces the iframe body with the generated HTML fragment.</p></article>` : `
-    <section class="hero"><h1>Vibe Browser</h1><p>Type a query or URL. Results are simulated by the local runtime.</p></section>`;
-  return {
-    title: 'Vibe Browser',
-    html: `<style>
-      .browser{font-family:Ubuntu,Segoe UI,sans-serif;background:#f6f5f4;min-height:100%;color:#241f31}.bar{display:flex;gap:8px;padding:10px;background:#3d3846}.bar input{flex:1;border:0;border-radius:999px;padding:10px 14px}.bar button{border:0;border-radius:999px;padding:0 16px;background:#e95420;color:white}.page{padding:22px;max-width:880px;margin:auto}.hero{background:white;border-radius:18px;padding:42px;text-align:center;box-shadow:0 12px 30px #0001}.notice{background:#fff4e5;border-left:5px solid #e95420;padding:12px;border-radius:10px;margin-bottom:16px}article{background:white;border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 8px 24px #00000012}h2,h3{color:#77216f}</style>
-      <main class="browser"><form class="bar"><input name="q" value="${escapeHtml(q)}" placeholder="Search or enter address"><button type="submit">Go</button></form><div class="page">${content}</div></main>`,
-    narration: 'mock browser rendered'
-  };
-}
-
-function updateTerminalHistory(session, event) {
-  const history = session.mockState?.terminalHistory || [];
-  const cmd = event.formData?.cmd || event.allInputs?.cmd || event.value || '';
-  const next = [...history];
-  if (cmd.trim()) next.push({ cmd: cmd.trim(), output: terminalOutput(cmd.trim()) });
-  session.mockState = { ...(session.mockState || {}), terminalHistory: next.slice(-20) };
-  return session.mockState.terminalHistory;
-}
-
-function terminalOutput(cmd) {
-  if (cmd === 'help') return 'Available fake commands: help, neofetch, ls, pwd, date, echo <text>, open <app>, clear';
-  if (cmd === 'neofetch') return 'VibeOS Demo 1.0\nHost: Windows-native Node.js runtime\nShell: hallucinated terminal\nUI: Ubuntu/Yaru-inspired';
-  if (cmd === 'ls') return 'Desktop  Documents  Downloads  Pictures  vibe-notes.txt';
-  if (cmd === 'pwd') return '/home/vibe';
-  if (cmd === 'date') return new Date().toString();
-  if (cmd.startsWith('echo ')) return cmd.slice(5);
-  if (cmd.startsWith('open ')) return `Request noted: ${cmd}. Use the dock to open apps in this demo.`;
-  if (cmd === 'clear') return '__CLEAR__';
-  return `${cmd}: command simulated, not executed. Type help.`;
-}
-
-function mockTerminal(history = []) {
-  const visible = history.some(h => h.cmd === 'clear') ? history.slice(history.findLastIndex?.(h => h.cmd === 'clear') + 1 || 0) : history;
-  return {
-    title: 'Terminal',
-    html: `<style>
-      .term{height:100%;background:#300a24;color:#f7f7f7;font-family:Cascadia Mono,Consolas,monospace;padding:14px;box-sizing:border-box}.line{white-space:pre-wrap;line-height:1.45}.prompt{color:#8ff0a4}.out{color:#deddda;margin-bottom:8px}.cmd{display:flex;gap:8px;align-items:center}.cmd input{flex:1;background:transparent;border:0;border-bottom:1px solid #5e2750;color:#fff;font:inherit;outline:0;padding:6px}</style>
-      <main class="term"><div class="line">VibeOS Terminal — simulated shell. Type <b>help</b>.</div>${visible.map(h => `<div class="line"><span class="prompt">vibe@demo:~$</span> ${escapeHtml(h.cmd)}</div><div class="line out">${escapeHtml(h.output === '__CLEAR__' ? '' : h.output)}</div>`).join('')}<form class="cmd"><span class="prompt">vibe@demo:~$</span><input name="cmd" autofocus autocomplete="off"><button type="submit" hidden>Run</button></form></main>`,
-    narration: 'mock terminal rendered'
-  };
-}
-
-function mockNotepad(note, title) {
-  return {
-    title: 'Text Editor',
-    html: `<style>
-      .note{height:100%;display:flex;flex-direction:column;background:#f6f5f4;font-family:Ubuntu,Segoe UI,sans-serif}.toolbar{display:flex;gap:8px;background:#deddda;padding:8px}.toolbar input{border:0;border-radius:8px;padding:8px;min-width:220px}.toolbar button{border:0;border-radius:8px;background:#e95420;color:white;padding:8px 12px}textarea{flex:1;border:0;resize:none;padding:18px;font:16px/1.5 "Segoe UI",sans-serif;outline:0}.status{padding:6px 12px;background:#fff;color:#5e5c64}</style>
-      <form class="note"><div class="toolbar"><input name="title" value="${escapeHtml(title)}"><button type="submit">Save in session</button></div><textarea name="note" placeholder="Write notes here...">${escapeHtml(note)}</textarea><div class="status">Session-only note. No disk writes.</div></form>`,
-    narration: 'mock editor rendered'
-  };
-}
-
-function mockFiles() {
-  const rows = [
-    ['Desktop', 'Folder', 'Today'], ['Documents', 'Folder', 'Today'], ['Downloads', 'Folder', 'Yesterday'], ['vibe-notes.txt', 'Text document', 'Today'], ['demo-screenshot.png', 'Image', 'Simulated']
-  ];
-  return {
-    title: 'Files',
-    html: `<style>
-      .files{display:grid;grid-template-columns:180px 1fr;height:100%;font-family:Ubuntu,Segoe UI,sans-serif;background:#fff}.side{background:#f6f5f4;border-right:1px solid #deddda;padding:14px}.side button{display:block;width:100%;text-align:left;border:0;background:transparent;border-radius:8px;padding:9px}.side button:hover{background:#e9542030}.main{padding:18px}.crumb{color:#77216f;font-weight:700;margin-bottom:14px}table{width:100%;border-collapse:collapse}td,th{padding:12px;border-bottom:1px solid #eee;text-align:left}tr:hover{background:#fff4e5}.tag{background:#deddda;border-radius:999px;padding:4px 8px}</style>
-      <main class="files"><aside class="side"><button>Home</button><button>Desktop</button><button>Documents</button><button>Downloads</button><button>Trash</button></aside><section class="main"><div class="crumb">Home / vibe</div><table><thead><tr><th>Name</th><th>Type</th><th>Modified</th></tr></thead><tbody>${rows.map(r => `<tr><td>${escapeHtml(r[0])}</td><td><span class="tag">${escapeHtml(r[1])}</span></td><td>${escapeHtml(r[2])}</td></tr>`).join('')}</tbody></table><p>This file manager is simulated and cannot read your disk.</p></section></main>`,
-    narration: 'mock files rendered'
-  };
-}
-
-function mockSettings(selected = '') {
-  return {
-    title: 'Settings',
-    html: `<style>
-      .settings{height:100%;display:grid;grid-template-columns:210px 1fr;font-family:Ubuntu,Segoe UI,sans-serif;background:#fff}.nav{background:#f6f5f4;padding:12px;border-right:1px solid #deddda}.nav button{display:block;width:100%;border:0;background:transparent;text-align:left;padding:10px;border-radius:10px}.nav button:hover,.nav .active{background:#e95420;color:white}.pane{padding:24px}.card{border:1px solid #deddda;border-radius:16px;padding:18px;margin:0 0 14px;box-shadow:0 8px 22px #0000000d}.switch{float:right;background:#e95420;color:#fff;border-radius:999px;padding:4px 10px}</style>
-      <main class="settings"><aside class="nav"><button class="active">Appearance</button><button>Network</button><button>Privacy</button><button>LLM Runtime</button><button>About</button></aside><section class="pane"><h1>Settings</h1><div class="card"><b>Theme</b><span class="switch">Yaru Dark/Light</span><p>Ubuntu-inspired desktop shell with aubergine panels and orange accents.</p></div><div class="card"><b>LLM provider</b><p>Configured by the local .env file. Current selection: ${escapeHtml(CONFIG.provider)}.</p></div><div class="card"><b>Security</b><p>Apps are sandboxed iframes. Generated script and inline event handlers are stripped by the server.</p></div><p>${escapeHtml(selected)}</p></section></main>`,
-    narration: 'mock settings rendered'
-  };
-}
-
-function mockTasks(task = '') {
-  const items = ['Wire iframe event bridge', 'Keep app sessions isolated', 'Render Ubuntu-style shell'];
-  if (task) items.unshift(task);
-  return {
-    title: 'Tasks',
-    html: `<style>
-      .tasks{font-family:Ubuntu,Segoe UI,sans-serif;background:#f6f5f4;height:100%;padding:24px;box-sizing:border-box}.board{max-width:640px;margin:auto;background:white;border-radius:18px;padding:20px;box-shadow:0 18px 50px #0002}form{display:flex;gap:8px}input{flex:1;border:1px solid #deddda;border-radius:10px;padding:10px}button{border:0;background:#e95420;color:#fff;border-radius:10px;padding:10px 14px}li{padding:11px;margin:8px 0;background:#fff4e5;border-radius:12px}</style>
-      <main class="tasks"><section class="board"><h1>Tasks</h1><form><input name="task" placeholder="Add a simulated task"><button>Add</button></form><ul>${items.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul></section></main>`,
-    narration: 'mock task app rendered'
-  };
-}
-
-function mockPrompt(intent = '') {
-  const preview = intent ? `<div class="preview"><h2>Generated app idea</h2><p>${escapeHtml(intent)}</p><p>In real LLM mode, describe the app here and the model will transform this window into that app after submission.</p></div>` : '';
-  return {
-    title: 'Vibe Prompt',
-    html: `<style>
-      .prompt{font-family:Ubuntu,Segoe UI,sans-serif;min-height:100%;background:linear-gradient(135deg,#2c001e,#77216f);color:white;display:grid;place-items:center}.box{width:min(680px,92%);background:#ffffff12;border:1px solid #ffffff25;border-radius:22px;padding:28px;backdrop-filter:blur(10px)}textarea{width:100%;height:130px;border:0;border-radius:14px;padding:14px;font:16px Segoe UI,sans-serif}button{border:0;border-radius:999px;padding:12px 18px;background:#e95420;color:#fff;margin-top:10px}.preview{background:#0002;border-radius:16px;margin-top:16px;padding:16px}</style>
-      <main class="prompt"><form class="box"><h1>Describe an app</h1><p>The current iframe session will be regenerated from your prompt.</p><textarea name="intent" placeholder="Example: make a kanban board for app launch tasks">${escapeHtml(intent)}</textarea><br><button type="submit">Generate inside this window</button>${preview}</form></main>`,
-    narration: 'mock prompt rendered'
-  };
-}
-
-function mockAbout() {
-  return {
-    title: 'About VibeOS',
-    html: `<style>
-      .about{font-family:Ubuntu,Segoe UI,sans-serif;background:#f6f5f4;min-height:100%;display:grid;place-items:center}.card{max-width:720px;background:white;border-radius:24px;padding:30px;box-shadow:0 24px 70px #0002}.logo{width:74px;height:74px;border-radius:20px;background:linear-gradient(135deg,#e95420,#77216f);display:grid;place-items:center;color:#fff;font-size:38px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.pill{background:#fff4e5;border-radius:14px;padding:12px}</style>
-      <main class="about"><section class="card"><div class="logo">◆</div><h1>VibeOS Demo</h1><p>Local experimental hallucinated desktop: Node.js server, browser shell, iframe apps, independent LLM sessions.</p><div class="grid"><div class="pill">Provider: ${escapeHtml(CONFIG.provider)}</div><div class="pill">Model: ${escapeHtml(providerStatus().model)}</div><div class="pill">Scripts stripped</div><div class="pill">No local shell execution</div></div></section></main>`,
-    narration: 'mock about rendered'
-  };
-}
-
-function mockCustom(title, intent) {
-  return {
-    title: title || 'Vibe App',
-    html: `<style>
-      .custom{font-family:Ubuntu,Segoe UI,sans-serif;min-height:100%;background:#f6f5f4;padding:24px;box-sizing:border-box}.card{background:white;border-radius:20px;padding:24px;box-shadow:0 18px 50px #0002}button{border:0;border-radius:10px;background:#e95420;color:white;padding:10px 14px}input{border:1px solid #deddda;border-radius:10px;padding:10px}</style>
-      <main class="custom"><section class="card"><h1>${escapeHtml(title || 'Vibe App')}</h1><p>${escapeHtml(intent || 'This is a generated placeholder app. Configure an LLM provider for richer behavior.')}</p><form><input name="message" placeholder="Interact with this app"><button>Send</button></form></section></main>`,
-    narration: 'mock custom app rendered'
-  };
-}
-
 async function createSession(payload) {
   const session = {
     id: id('session'),
@@ -642,13 +474,14 @@ async function createSession(payload) {
     intent: payload.intent || '',
     messages: [],
     html: '',
+    appState: {},
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    mockState: {}
+    updatedAt: new Date().toISOString()
   };
   const result = await generateInitialHtml(payload);
   session.title = result.title || session.title;
   session.html = result.html;
+  session.appState = result.state;
   session.messages.push({ role: 'user', content: initialUserPrompt(payload) });
   session.messages.push({ role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
   sessions.set(session.id, session);
@@ -734,7 +567,7 @@ server.listen(CONFIG.port, '127.0.0.1', () => {
   const status = providerStatus();
   console.log(`VibeOS demo running at http://127.0.0.1:${CONFIG.port}`);
   console.log(`LLM_PROVIDER=${status.provider}; model=${status.model}; ready=${status.ready}`);
-  if (!status.ready) console.log('Provider selected but API key is missing. Edit .env or use LLM_PROVIDER=mock.');
+  if (!status.ready) console.log('Provider selected but API key is missing. Edit .env.');
   console.log('No local OS commands are executed by this demo.');
   logger.info('sys', { act: 'start', port: CONFIG.port, prv: status.provider, mdl: status.model, ready: status.ready });
 

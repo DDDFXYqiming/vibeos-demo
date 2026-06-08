@@ -30,7 +30,6 @@ POST /api/sessions/:id/event
 - 每个应用独立 session：Browser、Terminal、Calculator、Files、Text Editor、Tasks、Settings、Vibe Prompt、About。
 - iframe 事件桥：自动捕获按钮点击、表单提交、输入框 Enter、select/checkbox/radio/range 变化。
 - LLM 后端：支持 OpenAI / OpenAI-compatible / Anthropic。
-- Mock 模式：没有 API Key 也能直接跑，便于先验收 UI 和交互链路。
 - 安全边界：不执行本地命令；服务端会移除模型返回的 `<script>` 和 inline event handlers；iframe 使用 sandbox。
 - Windows 原生：无 Docker、无 WSL、无数据库、无 npm 依赖。
 
@@ -68,7 +67,7 @@ start.cmd
 http://127.0.0.1:8765
 ```
 
-首次启动会自动从 `.env.example` 复制 `.env`。默认 `LLM_PROVIDER=mock`，不需要 API Key。
+首次启动会自动从 `.env.example` 复制 `.env`。
 
 ## 配置 OpenAI / OpenAI-compatible
 
@@ -146,8 +145,8 @@ vibeos-demo/
 - 不读取真实磁盘文件。
 - 不执行 PowerShell、CMD、Bash 或系统命令。
 - 不访问真实浏览器历史、Cookie、密码或系统凭据。
-- Browser/Files/Terminal 都是“模拟应用”。
-- 生成内容全部是幻觉。
+- Browser/Files/Terminal 等应用由 LLM 实时生成界面与交互逻辑。
+- 应用状态保存在服务端 session 内存中，重启后丢失。
 
 ## API
 
@@ -173,9 +172,9 @@ iframe 事件回传。前端会自动发送，通常不需要手写。
 
 ## 常见问题
 
-### 1. 启动后还是 mock 模式？
+### 1. 启动之后无法交互？
 
-检查 `.env`：
+检查模型配置 `.env`：
 
 ```env
 LLM_PROVIDER=openai
