@@ -540,7 +540,9 @@ function serveStatic(req, res, url) {
       'cache-control': ext === '.html' ? 'no-store' : 'public, max-age=60',
       'x-content-type-options': 'nosniff'
     });
-    fs.createReadStream(file).pipe(res);
+    const stream = fs.createReadStream(file);
+    stream.on('error', () => notFound(res));
+    stream.pipe(res);
   });
 }
 
@@ -579,4 +581,12 @@ server.listen(CONFIG.port, '127.0.0.1', () => {
 
   // Daily log cleanup
   setInterval(() => logger.cleanup(), 86400000);
+});
+
+// Prevent silent crashes from unhandled async errors
+process.on('unhandledRejection', (reason) => {
+  logger.err('sys', { act: 'unhandled_rejection', err: String(reason).slice(0, 200) });
+});
+process.on('uncaughtException', (err) => {
+  logger.err('sys', { act: 'uncaught_exception', err: err.message?.slice(0, 200) });
 });
