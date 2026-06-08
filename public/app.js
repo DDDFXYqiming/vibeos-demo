@@ -176,7 +176,7 @@ async function openApp(app, geometry = {}) {
     focusWindow(existing.element);
     return;
   }
-  if (restoreClosedSession(app.appId)) return;
+  if (await restoreClosedSession(app.appId)) return;
 
   const localId = `win_${++state.counter}`;
   const win = createWindow(localId, app.title, geometry);
