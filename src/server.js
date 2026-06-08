@@ -262,7 +262,7 @@ You MUST return a strict JSON object with EXACTLY these 4 fields — no more, no
   "narration": "one short internal note"
 }
 
-CRITICAL: The field name is "html" (lowercase), NOT "htmlExcerpt" or "_htmlSummary". Previous assistant messages in the conversation use "_htmlSummary" for brevity — that is internal history only. YOUR response must always contain the full "html" field.
+CRITICAL: Your response MUST contain the field "html" with the full HTML content. Do not omit it or use any other field name.
 
 The "state" field is CRITICAL. It must be a valid JSON object that captures all mutable data of the app:
 - Calculator: current expression, display value, calculation history
@@ -429,7 +429,7 @@ async function generateNextHtml(session, event) {
       result = normalizeModelResult(raw, session.title);
     }
     session.appState = result.state;
-    session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, _htmlSummary: clip(result.html, 6000) }) });
+    session.messages.push(userMessage, { role: 'assistant', content: `Rendered "${result.title}". ${result.narration} State: ${JSON.stringify(result.state).slice(0, 800)}` });
     // P2: Preserve the first user message (initial intent) — only prune middle pairs
     while (session.messages.length > CONFIG.maxSessionMessages) {
       // Skip index 0 (initial intent) — start pruning from index 2
@@ -572,7 +572,7 @@ async function createSession(payload) {
   session.html = result.html;
   session.appState = result.state;
   session.messages.push({ role: 'user', content: initialUserPrompt(payload) });
-  session.messages.push({ role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, _htmlSummary: clip(result.html, 6000) }) });
+  session.messages.push({ role: 'assistant', content: `Rendered "${result.title}". ${result.narration} State: ${JSON.stringify(result.state).slice(0, 800)}` });
   sessions.set(session.id, session);
   logger.info('sess', { act: 'create', sid: session.id, aid: session.appId, cnt: sessions.size });
   return { session, result };
