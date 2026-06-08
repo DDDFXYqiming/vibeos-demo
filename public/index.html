@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VibeOS Demo</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-card">
+      <div class="boot-logo">◆</div>
+      <h1>VibeOS</h1>
+      <p>Fully hallucinated desktop demo</p>
+      <pre id="bootLog"></pre>
+    </div>
+  </div>
+
+  <div id="desktop" class="desktop" aria-label="VibeOS desktop">
+    <header class="topbar">
+      <button id="activitiesBtn" class="top-button activities">Activities</button>
+      <div id="activeTitle" class="active-title">VibeOS Desktop</div>
+      <div class="top-status">
+        <span id="providerBadge" class="provider-badge">provider</span>
+        <span id="clock">--:--</span>
+        <button id="powerBtn" class="top-icon" title="Show runtime info">⏻</button>
+      </div>
+    </header>
+
+    <aside class="dock" aria-label="Application dock">
+      <button data-app="files" title="Files"><span>📁</span></button>
+      <button data-app="browser" title="Browser"><span>🌐</span></button>
+      <button data-app="terminal" title="Terminal"><span>▣</span></button>
+      <button data-app="calculator" title="Calculator"><span>🧮</span></button>
+      <button data-app="notepad" title="Text Editor"><span>📝</span></button>
+      <button data-app="tasks" title="Tasks"><span>☑</span></button>
+      <button data-app="settings" title="Settings"><span>⚙</span></button>
+      <button data-app="prompt" title="Vibe Prompt"><span>✨</span></button>
+      <button data-app="about" title="About"><span>◆</span></button>
+    </aside>
+
+    <main id="workspace" class="workspace">
+      <section class="desktop-card welcome-card">
+        <div class="ubuntu-mark">◆</div>
+        <h1>VibeOS Demo</h1>
+        <p>一个 Windows 原生可启动的“LLM 驱动幻觉桌面”演示：每个应用窗口是独立 iframe，每个 iframe 对应独立 session，点击/提交事件会回传给模型生成下一版界面。</p>
+        <form id="quickPrompt" class="quick-prompt">
+          <input name="intent" placeholder="描述一个临时应用，例如：做一个世界杯投诉标签分析看板">
+          <button type="submit">生成应用</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="overview" class="overview hidden">
+      <div class="overview-panel">
+        <form id="overviewPrompt" class="overview-search">
+          <input name="intent" placeholder="Search apps or describe a new app" autocomplete="off">
+          <button>Generate</button>
+        </form>
+        <div class="app-grid">
+          <button data-app="files"><b>📁</b><span>Files</span></button>
+          <button data-app="browser"><b>🌐</b><span>Browser</span></button>
+          <button data-app="terminal"><b>▣</b><span>Terminal</span></button>
+          <button data-app="calculator"><b>🧮</b><span>Calculator</span></button>
+          <button data-app="notepad"><b>📝</b><span>Text Editor</span></button>
+          <button data-app="tasks"><b>☑</b><span>Tasks</span></button>
+          <button data-app="settings"><b>⚙</b><span>Settings</span></button>
+          <button data-app="prompt"><b>✨</b><span>Vibe Prompt</span></button>
+          <button data-app="about"><b>◆</b><span>About</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <template id="windowTemplate">
+    <section class="window" role="dialog" aria-label="Vibe app window">
+      <div class="window-header">
+        <div class="window-controls">
+          <button class="close" title="Close"></button>
+          <button class="minimize" title="Minimize"></button>
+          <button class="maximize" title="Maximize"></button>
+        </div>
+        <div class="window-title">Window</div>
+        <div class="window-spinner hidden"></div>
+      </div>
+      <div class="window-body">
+        <iframe sandbox="allow-scripts allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>
+      </div>
+      <div class="resize-handle" aria-hidden="true"></div>
+    </section>
+  </template>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "vibeos-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Windows-native, Ubuntu-styled, LLM-driven hallucinated desktop demo.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "keywords": [
+    "vibeos",
+    "llm",
+    "generative-ui",
+    "desktop-demo",
+    "iframe"
+  ],
+  "license": "MIT"
+}
