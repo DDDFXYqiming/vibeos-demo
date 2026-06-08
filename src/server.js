@@ -183,6 +183,7 @@ function tryParseJson(text) {
 function normalizeModelResult(result, fallbackTitle = 'Vibe App') {
   const parsed = typeof result === 'string' ? tryParseJson(result) : result;
   if (!parsed || typeof parsed !== 'object') {
+    logger.warn('llm', { act: 'parse_fail', raw: clip(result, 300) });
     return {
       title: fallbackTitle,
       html: fallbackHtml('Model returned non-JSON output', clip(result, 2500)),
@@ -191,9 +192,13 @@ function normalizeModelResult(result, fallbackTitle = 'Vibe App') {
     };
   }
   const state = parsed.state || {};
+  const html = parsed.html || '';
+  if (!html) {
+    logger.warn('llm', { act: 'empty_html', keys: Object.keys(parsed).join(','), narration: clip(parsed.narration || '', 100) });
+  }
   return {
     title: clip(parsed.title || fallbackTitle, 80),
-    html: stripUnsafeHtml(parsed.html || fallbackHtml('Empty response', 'The model returned no HTML.')),
+    html: stripUnsafeHtml(html || fallbackHtml('Empty response', 'The model returned no HTML.')),
     state: typeof state === 'object' && !Array.isArray(state) ? state : {},
     narration: clip(parsed.narration || parsed.explanation || '', 800)
   };
@@ -351,8 +356,15 @@ async function generateInitialHtml(app) {
     { role: 'user', content: initialUserPrompt(app) }
   ];
   try {
-    const raw = await callConfiguredLlm(messages);
-    const result = normalizeModelResult(raw, title);
+    let raw = await callConfiguredLlm(messages);
+    let result = normalizeModelResult(raw, title);
+    // Retry once if LLM returned empty HTML
+    if (!result.html || result.html.includes('The model returned no HTML')) {
+      logger.warn('llm', { act: 'retry_empty_html', aid: app.appId, typ: 'init' });
+      messages.push({ role: 'user', content: 'Your previous response had an empty "html" field. You MUST include a complete HTML fragment in the "html" field. Return the full JSON again with title, html, state, and narration.' });
+      raw = await callConfiguredLlm(messages);
+      result = normalizeModelResult(raw, title);
+    }
     t.stop({ ok: 1, hlen: result.html.length });
     return result;
   } catch (e) {
@@ -370,8 +382,15 @@ async function generateNextHtml(session, event) {
     userMessage
   ];
   try {
-    const raw = await callConfiguredLlm(messages);
-    const result = normalizeModelResult(raw, session.title);
+    let raw = await callConfiguredLlm(messages);
+    let result = normalizeModelResult(raw, session.title);
+    // Retry once if LLM returned empty HTML
+    if (!result.html || result.html.includes('The model returned no HTML')) {
+      logger.warn('llm', { act: 'retry_empty_html', aid: session.appId, etp: event.eventType });
+      messages.push({ role: 'user', content: 'Your previous response had an empty "html" field. You MUST include a complete HTML fragment in the "html" field. Return the full JSON again with title, html, state, and narration.' });
+      raw = await callConfiguredLlm(messages);
+      result = normalizeModelResult(raw, session.title);
+    }
     session.appState = result.state;
     session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
     // P2: Preserve the first user message (initial intent) — only prune middle pairs
