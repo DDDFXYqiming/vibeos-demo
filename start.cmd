@@ -6,7 +6,7 @@ if errorlevel 1 (
 )
 if not exist .env (
   copy .env.example .env >nul
-  echo Created .env from .env.example. Default provider is mock mode.
+  echo Created .env from .env.example. Edit it to set your API key before use.
 )
 echo Starting VibeOS demo...
 node src/server.js

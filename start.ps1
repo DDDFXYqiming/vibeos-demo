@@ -14,7 +14,7 @@ if ($major -lt 20) {
 
 if (-not (Test-Path ".env")) {
   Copy-Item ".env.example" ".env"
-  Write-Host "Created .env from .env.example. Default provider is mock mode." -ForegroundColor Yellow
+  Write-Host "Created .env from .env.example. Edit it to set your API key before use." -ForegroundColor Yellow
 }
 
 Write-Host "Starting VibeOS demo..." -ForegroundColor Cyan
