@@ -254,13 +254,15 @@ function escapeHtml(str) {
 function systemPrompt() {
   return `You are the UI renderer for VibeOS, a desktop operating system. Each app is an isolated iframe session, and you generate the next UI from user events.
 
-Return ONLY a strict JSON object with exactly these fields:
+You MUST return a strict JSON object with EXACTLY these 4 fields — no more, no less:
 {
   "title": "short window title",
-  "html": "complete HTML fragment for the iframe body; no <html>, no <body>, no <script>",
+  "html": "complete HTML fragment for the iframe body",
   "state": { "arbitrary": "JSON object representing the app's internal state" },
   "narration": "one short internal note"
 }
+
+CRITICAL: The field name is "html" (lowercase), NOT "htmlExcerpt" or "_htmlSummary". Previous assistant messages in the conversation use "_htmlSummary" for brevity — that is internal history only. YOUR response must always contain the full "html" field.
 
 The "state" field is CRITICAL. It must be a valid JSON object that captures all mutable data of the app:
 - Calculator: current expression, display value, calculation history
@@ -396,7 +398,7 @@ async function generateInitialHtml(app) {
     // Retry once if LLM returned empty HTML
     if (!result.html || result.html.includes('The model returned no HTML')) {
       logger.warn('llm', { act: 'retry_empty_html', aid: app.appId, typ: 'init' });
-      messages.push({ role: 'user', content: 'Your previous response had an empty "html" field. You MUST include a complete HTML fragment in the "html" field. Return the full JSON again with title, html, state, and narration.' });
+      messages.push({ role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' });
       raw = await callConfiguredLlm(messages);
       result = normalizeModelResult(raw, title);
     }
@@ -422,12 +424,12 @@ async function generateNextHtml(session, event) {
     // Retry once if LLM returned empty HTML
     if (!result.html || result.html.includes('The model returned no HTML')) {
       logger.warn('llm', { act: 'retry_empty_html', aid: session.appId, etp: event.eventType });
-      messages.push({ role: 'user', content: 'Your previous response had an empty "html" field. You MUST include a complete HTML fragment in the "html" field. Return the full JSON again with title, html, state, and narration.' });
+      messages.push({ role: 'user', content: 'Your previous response was missing the "html" field. You MUST return a JSON object with EXACTLY these fields: "title", "html", "state", "narration". Do NOT use "htmlExcerpt" or "_htmlSummary" — use the field name "html" with the full HTML content. Return the complete JSON again.' });
       raw = await callConfiguredLlm(messages);
       result = normalizeModelResult(raw, session.title);
     }
     session.appState = result.state;
-    session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
+    session.messages.push(userMessage, { role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, _htmlSummary: clip(result.html, 6000) }) });
     // P2: Preserve the first user message (initial intent) — only prune middle pairs
     while (session.messages.length > CONFIG.maxSessionMessages) {
       // Skip index 0 (initial intent) — start pruning from index 2
@@ -570,7 +572,7 @@ async function createSession(payload) {
   session.html = result.html;
   session.appState = result.state;
   session.messages.push({ role: 'user', content: initialUserPrompt(payload) });
-  session.messages.push({ role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, htmlExcerpt: clip(result.html, 6000) }) });
+  session.messages.push({ role: 'assistant', content: JSON.stringify({ title: result.title, narration: result.narration, _htmlSummary: clip(result.html, 6000) }) });
   sessions.set(session.id, session);
   logger.info('sess', { act: 'create', sid: session.id, aid: session.appId, cnt: sessions.size });
   return { session, result };
