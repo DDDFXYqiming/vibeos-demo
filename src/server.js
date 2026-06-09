@@ -366,7 +366,7 @@ CRITICAL INSTRUCTIONS:
 5. For input_snapshot events: do NOT regenerate the full page — only update state to capture the typed text.
 6. NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.
 7. Prefer a patch field for small localized updates: { selector, mode: "replaceInnerHTML", html }. Keep full html valid as fallback.
-8. Return strict JSON with title, html, state, narration, and optional patch fields.`;
+8. Return strict JSON with title, html, state, narration, and optional patch fields.${event.lastPatchFailed ? `\n9. PATCH FEEDBACK: Your previous "patch" was rejected by the client because its selector did not match the live DOM. For THIS turn you MUST return a complete "html" field that fully recreates the app body (you may omit the "patch" field entirely, or include one for a known-stable selector such as "#results" / "#history"). Do not rely on patch-only updates until at least one full-HTML render has succeeded.` : ''}`;
 }
 
 async function generateInitialHtml(app) {

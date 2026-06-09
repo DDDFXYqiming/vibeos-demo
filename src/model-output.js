@@ -16,6 +16,30 @@ export function escapeHtml(str) {
     .replaceAll("'", '&#039;');
 }
 
+const STYLE_BLOCK_RE = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+const STYLE_BUDGET_RATIO = 0.6; // up to 60% of maxHtmlChars may be reserved for <style> blocks
+const STYLE_CLIP_NOTICE = '\n/* ... css clipped for size ... */\n';
+const BODY_CLIP_NOTICE = '\n<!-- body clipped -->';
+
+function splitStyleAndBody(html) {
+  const blocks = [];
+  const body = String(html || '').replace(STYLE_BLOCK_RE, (_, css) => {
+    blocks.push(css);
+    return '';
+  });
+  return { body, blocks };
+}
+
+function styleBlockSize(css) {
+  return css.length + '<style></style>'.length;
+}
+
+function clipStyleBlock(css, max) {
+  if (css.length <= max) return css;
+  const keep = Math.max(0, Math.floor(max - STYLE_CLIP_NOTICE.length));
+  return css.slice(0, keep) + STYLE_CLIP_NOTICE;
+}
+
 export function stripUnsafeHtml(html, maxHtmlChars = DEFAULT_MAX_HTML_CHARS) {
   let out = String(html || '');
   out = out.replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -23,7 +47,38 @@ export function stripUnsafeHtml(html, maxHtmlChars = DEFAULT_MAX_HTML_CHARS) {
   out = out.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
   out = out.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
   out = out.replace(/javascript:/gi, '');
-  return out.slice(0, maxHtmlChars);
+
+  // ── Style-preserving truncation ──
+  // Strip all <style> blocks, compute the body budget that remains, then re-attach
+  // the style blocks up front. This prevents the previous behavior of slicing the
+  // entire string in the middle, which frequently cut <style> tags in half and
+  // collapsed the app's visual style.
+  const { body, blocks } = splitStyleAndBody(out);
+
+  if (!blocks.length) {
+    // No <style> blocks — behavior matches the old simple slice.
+    if (body.length <= maxHtmlChars) return body;
+    return body.slice(0, maxHtmlChars);
+  }
+
+  const styleBudget = Math.max(0, Math.floor(maxHtmlChars * STYLE_BUDGET_RATIO));
+  const originalStyleSize = blocks.reduce((sum, css) => sum + styleBlockSize(css), 0);
+
+  let styleHtml;
+  if (originalStyleSize <= styleBudget) {
+    styleHtml = blocks.map(css => `<style>${css}</style>`).join('\n');
+  } else {
+    // CSS itself is larger than budget — clip each block proportionally.
+    const perBlockCssBudget = Math.max(0, Math.floor(styleBudget / blocks.length) - '<style></style>'.length);
+    styleHtml = blocks.map(css => `<style>${clipStyleBlock(css, perBlockCssBudget)}</style>`).join('\n');
+  }
+
+  const bodyBudget = Math.max(0, maxHtmlChars - styleHtml.length);
+  const clippedBody = body.length > bodyBudget
+    ? body.slice(0, bodyBudget) + BODY_CLIP_NOTICE
+    : body;
+
+  return styleHtml + clippedBody;
 }
 
 export function fallbackHtml(title, detail) {

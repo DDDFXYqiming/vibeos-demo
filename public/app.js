@@ -674,16 +674,32 @@ async function sendSessionEvent(sessionId, event, seq) {
   focusWindow(win);
   setLoading(win, true);
 
+  // Surface "the last patch was rejected" to the server so the model can switch
+  // back to a full HTML render on this turn. Consumed once per request so the
+  // hint does not stick after the model recovers.
+  const payload = { ...event };
+  if (record.lastPatchFailed) {
+    payload.lastPatchFailed = true;
+    record.lastPatchFailed = false;
+  }
+
   try {
     const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/event`, {
       method: 'POST',
-      body: JSON.stringify(event)
+      body: JSON.stringify(payload)
     });
     if (seq < (record.lastAppliedSeq || 0)) return;
     record.lastAppliedSeq = seq;
     if (!result.silent) {
       win.querySelector('.window-title').textContent = result.title || record.title;
-      if (!result.patch || !applyPatch(win, result.patch)) setIframeHtml(win, result.html, sessionId, record.app?.appId);
+      const usedPatch = Boolean(result.patch);
+      const patchOk = usedPatch ? applyPatch(win, result.patch) : true;
+      if (usedPatch && !patchOk) {
+        // The model chose a patch but the selector did not match the live DOM.
+        // Record this so the next event tells the model to render full HTML.
+        record.lastPatchFailed = true;
+      }
+      if (!patchOk) setIframeHtml(win, result.html, sessionId, record.app?.appId);
       record.title = result.title || record.title;
     }
   } catch (error) {
