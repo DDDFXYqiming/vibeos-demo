@@ -52,6 +52,21 @@ const THINKING_BUDGET_MAP = {
 const sessions = new Map();
 const logs = [];
 
+// Session idle GC: a setInterval that drops sessions that haven't been
+// touched in SESSION_TTL_MS. The Map is mutated in place so the runtime
+// state stays consistent.
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const SESSION_GC_INTERVAL_MS = 60 * 1000; // 1 minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - (session.lastActivityAt || 0) > SESSION_TTL_MS) {
+      sessions.delete(id);
+      logger.info('sess', { act: 'gc', sid: id, ageMs: now - session.lastActivityAt });
+    }
+  }
+}, SESSION_GC_INTERVAL_MS).unref?.();
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -509,13 +524,105 @@ async function withTimeout(promiseFactory, timeoutMs) {
   }
 }
 
+// ── Provider retry + circuit breaker ────────────────────────────────────────
+// Classify an HTTP error so we know whether to retry, wait, or give up.
+function classifyHttpError(status) {
+  if (status === 429) return { retry: true, wait: 'retry-after' };
+  if (status >= 500 && status < 600) return { retry: true, wait: 'backoff' };
+  if (status === 408 || status === 425) return { retry: true, wait: 'backoff' };
+  return { retry: false };
+}
+
+// Per-provider circuit breaker: opens after N consecutive failures, then
+// short-circuits subsequent calls for a cooldown window so we don't
+// hammer a downed provider.
+const CIRCUIT_STATE = new Map(); // name -> { failures, openedAt, threshold, cooldownMs }
+function circuitRecord(name) {
+  return CIRCUIT_STATE.get(name) || (CIRCUIT_STATE.set(name, { failures: 0, openedAt: 0, threshold: 5, cooldownMs: 30_000 }).get(name));
+}
+function circuitAllow(name) {
+  const c = circuitRecord(name);
+  if (!c.openedAt) return true;
+  if (Date.now() - c.openedAt > c.cooldownMs) {
+    // Half-open: allow a single probe.
+    c.openedAt = 0;
+    c.failures = 0;
+    return true;
+  }
+  return false;
+}
+function circuitRecordSuccess(name) {
+  const c = circuitRecord(name);
+  c.failures = 0;
+  c.openedAt = 0;
+}
+function circuitRecordFailure(name) {
+  const c = circuitRecord(name);
+  c.failures += 1;
+  if (c.failures >= c.threshold) c.openedAt = Date.now();
+}
+
+// Sleep with abort signal awareness so a circuit-breaker / client disconnect
+// can interrupt the backoff window.
+function sleep(ms, signal) {
+  return new Promise(resolve => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(resolve, ms);
+    if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+// Generic fetch-based retry wrapper used by both OpenAI and Anthropic
+// providers. Classifies status codes, honours Retry-After, and updates the
+// circuit breaker state.
+async function withFetchRetry(name, url, init, { attempts = 3, baseDelayMs = 400, signal } = {}) {
+  if (!circuitAllow(name)) {
+    const err = new Error(`Provider "${name}" is in cooldown. Try again shortly.`);
+    err.status = 503;
+    throw err;
+  }
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const resp = await fetch(url, { ...init, signal });
+      if (resp.ok) {
+        circuitRecordSuccess(name);
+        return resp;
+      }
+      const decision = classifyHttpError(resp.status);
+      const text = await resp.text();
+      if (!decision.retry) {
+        // Non-retryable: surface immediately.
+        circuitRecordFailure(name);
+        throw new Error(`${name} API error ${resp.status}: ${clip(text, 1500)}`);
+      }
+      lastError = new Error(`${name} API error ${resp.status}: ${clip(text, 1500)}`);
+      if (i === attempts - 1) break; // last attempt, don't sleep
+      let waitMs = baseDelayMs * Math.pow(2, i);
+      if (decision.wait === 'retry-after') {
+        const ra = Number.parseFloat(resp.headers.get('retry-after') || '');
+        if (Number.isFinite(ra)) waitMs = Math.max(waitMs, ra * 1000);
+      }
+      await sleep(waitMs, signal);
+    } catch (e) {
+      if (e?.name === 'AbortError') { circuitRecordFailure(name); throw e; }
+      // Network errors (DNS, ECONNRESET, etc.) — retry once.
+      lastError = e;
+      if (i === attempts - 1) break;
+      await sleep(baseDelayMs * Math.pow(2, i), signal);
+    }
+  }
+  circuitRecordFailure(name);
+  throw lastError;
+}
+
 async function callOpenAi(messages, options = {}) {
   const thinkingLevel = options.thinkingLevel || CONFIG.thinkingLevel;
   const t = logger.timer('llm', { prv: 'openai', mdl: CONFIG.openaiModel, thk: thinkingLevel });
   const totalChars = messages.reduce((sum, m) => sum + String(m.content).length, 0);
   try {
     const result = await withTimeout(async (signal) => {
-      const resp = await fetch(`${CONFIG.openaiBaseUrl}/chat/completions`, {
+      const resp = await withFetchRetry('openai', `${CONFIG.openaiBaseUrl}/chat/completions`, {
         method: 'POST',
         signal,
         headers: {
@@ -537,9 +644,8 @@ async function callOpenAi(messages, options = {}) {
           }
           return payload;
         })())
-      });
+      }, { signal });
       const text = await resp.text();
-      if (!resp.ok) throw new Error(`OpenAI-compatible API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return data.choices?.[0]?.message?.content || '';
     }, timeoutForModel({ model: CONFIG.openaiModel, thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
@@ -567,7 +673,7 @@ async function callAnthropic(messages, options = {}) {
       // turn so the request is well-formed even when the conversation
       // history hits a state machine edge case.
       const normalized = enforceAlternation(filtered);
-      const resp = await fetch(`${CONFIG.anthropicBaseUrl}/v1/messages`, {
+      const resp = await withFetchRetry('anthropic', `${CONFIG.anthropicBaseUrl}/v1/messages`, {
         method: 'POST',
         signal,
         headers: {
@@ -592,9 +698,8 @@ async function callAnthropic(messages, options = {}) {
           }
           return payload;
         })())
-      });
+      }, { signal });
       const text = await resp.text();
-      if (!resp.ok) throw new Error(`Anthropic API error ${resp.status}: ${clip(text, 1500)}`);
       const data = JSON.parse(text);
       return (data.content || []).map(part => part.type === 'text' ? part.text : '').join('\n');
     }, timeoutForModel({ model: CONFIG.anthropicModel, thinkingLevel, baseTimeoutMs: CONFIG.timeoutMs }));
@@ -616,7 +721,11 @@ async function createSession(payload) {
     html: '',
     appState: {},
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    lastActivityAt: Date.now(),
+    // Inflight chain: each subsequent LLM call on this session awaits the
+    // previous one so we never race two generateNextHtml() on the same state.
+    inflight: Promise.resolve()
   };
   const result = await generateInitialHtml(payload);
   session.title = result.title || session.title;
@@ -630,6 +739,19 @@ async function createSession(payload) {
 }
 
 async function handleApi(req, res, url) {
+  // Lightweight route table: each entry is [method, path-matcher, handler].
+  // path-matcher can be a string (exact) or { regex, param } for parametric
+  // routes. First match wins, falling through to 404 if nothing matches.
+  const m = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (req.method === 'GET' && m) {
+    const session = sessions.get(m[1]);
+    if (!session) return send(res, 404, { error: 'session_not_found' });
+    return send(res, 200, { id: session.id, appId: session.appId, title: session.title, intent: session.intent, html: session.html, state: session.appState, provider: providerStatus() });
+  }
+  const e = url.pathname.match(/^\/api\/sessions\/([^/]+)\/event$/);
+  if (req.method === 'POST' && e) {
+    return handleSessionEvent(req, res, e[1]);
+  }
   if (req.method === 'GET' && url.pathname === '/api/health') {
     return send(res, 200, { ok: true, time: new Date().toISOString(), sessions: sessions.size });
   }
@@ -639,48 +761,54 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/sessions') {
     return send(res, 200, Array.from(sessions.values()).map(s => ({ id: s.id, appId: s.appId, title: s.title, intent: s.intent, updatedAt: s.updatedAt })));
   }
-  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
-  if (req.method === 'GET' && sessionMatch) {
-    const session = sessions.get(sessionMatch[1]);
-    if (!session) return send(res, 404, { error: 'session_not_found' });
-    return send(res, 200, { id: session.id, appId: session.appId, title: session.title, intent: session.intent, html: session.html, state: session.appState, provider: providerStatus() });
-  }
   if (req.method === 'POST' && url.pathname === '/api/sessions') {
-    const payload = await readJson(req);
-    const { session, result } = await createSession(payload);
-    logs.push({ t: Date.now(), type: 'session:create', id: session.id, appId: session.appId });
-    return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
-  }
-  const eventMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/event$/);
-  if (req.method === 'POST' && eventMatch) {
-    const session = sessions.get(eventMatch[1]);
-    if (!session) {
-      logger.warn('evt', { act: 'drop', sid: eventMatch[1], why: 'session_not_found' });
-      return send(res, 404, { error: 'session_not_found' });
-    }
-    const event = await readJson(req);
-    logger.perf('evt', { etp: event.eventType, aid: session.appId, sid: session.id, sel: event.clickedSelector?.slice(0, 40) || '' });
-
-    // input_snapshot: update state silently, no LLM call
-    if (event.eventType === 'input_snapshot') {
-      if (event.allInputs) {
-        session.appState = { ...session.appState, _liveInputs: event.allInputs };
-      }
-      session.updatedAt = new Date().toISOString();
-      return send(res, 200, { id: session.id, title: session.title, html: session.html, narration: '', provider: providerStatus(), silent: true });
-    }
-
-    const result = await generateNextHtml(session, event);
-    session.title = result.title || session.title;
-    session.html = result.html;
-    session.updatedAt = new Date().toISOString();
-    logs.push({ t: Date.now(), type: 'session:event', id: session.id, appId: session.appId, eventType: event.eventType });
-    return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
+    return handleCreateSession(req, res);
   }
   if (req.method === 'GET' && url.pathname === '/api/logs') {
     return send(res, 200, logs.slice(-100));
   }
   return notFound(res);
+}
+
+async function handleCreateSession(req, res) {
+  const payload = await readJson(req);
+  const { session, result } = await createSession(payload);
+  logs.push({ t: Date.now(), type: 'session:create', id: session.id, appId: session.appId });
+  return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
+}
+
+async function handleSessionEvent(req, res, sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    logger.warn('evt', { act: 'drop', sid: sessionId, why: 'session_not_found' });
+    return send(res, 404, { error: 'session_not_found' });
+  }
+  const event = await readJson(req);
+  logger.perf('evt', { etp: event.eventType, aid: session.appId, sid: session.id, sel: event.clickedSelector?.slice(0, 40) || '' });
+
+  // input_snapshot: update state silently, no LLM call
+  if (event.eventType === 'input_snapshot') {
+    if (event.allInputs) {
+      session.appState = { ...session.appState, _liveInputs: event.allInputs };
+    }
+    session.updatedAt = new Date().toISOString();
+    session.lastActivityAt = Date.now();
+    return send(res, 200, { id: session.id, title: session.title, html: session.html, narration: '', provider: providerStatus(), silent: true });
+  }
+
+  // Serialize concurrent events on the same session so two LLM calls can't
+  // race over session.html / session.appState. Each new chain awaits the
+  // previous one (mirroring the front-end record.queue pattern).
+  const prevInflight = session.inflight || Promise.resolve();
+  const work = prevInflight.then(() => generateNextHtml(session, event));
+  session.inflight = work.catch(() => {}); // never let a rejection poison the chain
+  const result = await work;
+  session.title = result.title || session.title;
+  session.html = result.html;
+  session.updatedAt = new Date().toISOString();
+  session.lastActivityAt = Date.now();
+  logs.push({ t: Date.now(), type: 'session:event', id: session.id, appId: session.appId, eventType: event.eventType });
+  return send(res, 200, { id: session.id, title: result.title, html: result.html, patch: result.patch || null, narration: result.narration, provider: providerStatus() });
 }
 
 function serveStatic(req, res, url) {
