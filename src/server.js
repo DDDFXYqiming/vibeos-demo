@@ -105,9 +105,23 @@ function safeJoin(base, requestedPath) {
   return resolved;
 }
 
+// Maximum JSON request body size (1 MB). A LLM-driven demo should never
+// legitimately exceed this; rejecting early protects the server from
+// accidental or hostile unbounded reads.
+const MAX_JSON_BYTES = 1_000_000;
+
 async function readJson(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > MAX_JSON_BYTES) {
+      const err = new Error('Request body too large.');
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString('utf8');
   if (!text.trim()) return {};
@@ -465,6 +479,26 @@ async function callConfiguredLlm(messages, options = {}) {
   throw new Error(`Unsupported LLM_PROVIDER: ${CONFIG.provider}`);
 }
 
+// Enforce Anthropic's strict user/assistant alternation. Two consecutive
+// user turns get folded into a single turn separated by '\n\n' so the wire
+// payload remains valid even when the conversation history skips a turn.
+function enforceAlternation(messages) {
+  const out = [];
+  for (const msg of messages) {
+    const last = out[out.length - 1];
+    if (last && last.role === msg.role) {
+      last.content = `${last.content}\n\n${msg.content}`;
+    } else {
+      out.push({ ...msg });
+    }
+  }
+  // Anthropic requires the first message to be a user turn.
+  if (out.length && out[0].role === 'assistant') {
+    out.unshift({ role: 'user', content: '(continuation)' });
+  }
+  return out;
+}
+
 async function withTimeout(promiseFactory, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -528,6 +562,11 @@ async function callAnthropic(messages, options = {}) {
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: m.content
       }));
+      // Anthropic's API requires strict user→assistant alternation. If two
+      // user messages sit next to each other, fold them into a single user
+      // turn so the request is well-formed even when the conversation
+      // history hits a state machine edge case.
+      const normalized = enforceAlternation(filtered);
       const resp = await fetch(`${CONFIG.anthropicBaseUrl}/v1/messages`, {
         method: 'POST',
         signal,
@@ -542,7 +581,7 @@ async function callAnthropic(messages, options = {}) {
             max_tokens: 4096,
             temperature: 0.45,
             system,
-            messages: filtered
+            messages: normalized
           };
           if (thinkingLevel !== 'off') {
             payload.thinking = {

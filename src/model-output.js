@@ -122,7 +122,12 @@ function findOutermostJsonObject(text) {
 }
 
 function parseJsonCandidate(candidate) {
-  const attempts = [
+  // Short-circuit: the most common case is that the raw candidate already
+  // parses cleanly. Only fall back to repair variants when JSON.parse rejects.
+  // Repair variants are sorted cheapest-first so we never pay for expensive
+  // transforms (control-char sweep, escape repair) when a simple comma
+  // removal would have done the job.
+  const variants = [
     candidate,
     candidate.replace(/,\s*([}\]])/g, '$1'),
     removeControlChars(candidate),
@@ -130,9 +135,9 @@ function parseJsonCandidate(candidate) {
     repairInvalidJsonEscapes(removeControlChars(candidate).replace(/,\s*([}\]])/g, '$1'))
   ];
   let lastError = null;
-  for (const attempt of attempts) {
+  for (const variant of variants) {
     try {
-      return { parsed: JSON.parse(attempt), error: null };
+      return { parsed: JSON.parse(variant), error: null };
     } catch (error) {
       lastError = error;
     }
