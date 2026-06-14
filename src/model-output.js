@@ -160,6 +160,23 @@ export function tryParseJson(text) {
   return parseModelOutput(text).parsed;
 }
 
+// Module-level cache for the field-extraction regexes used by looseExtractModelObject.
+// Re-creating a RegExp on every call is wasted work for hot event handlers.
+const FIELD_RE_CACHE = Object.create(null);
+function getFieldRe(field) {
+  if (!FIELD_RE_CACHE[field]) {
+    FIELD_RE_CACHE[field] = new RegExp(`"${field}"\\s*:\\s*"`, 'i');
+  }
+  return FIELD_RE_CACHE[field];
+}
+const FIELD_OBJECT_RE_CACHE = Object.create(null);
+function getFieldObjectRe(field) {
+  if (!FIELD_OBJECT_RE_CACHE[field]) {
+    FIELD_OBJECT_RE_CACHE[field] = new RegExp(`"${field}"\\s*:\\s*`, 'i');
+  }
+  return FIELD_OBJECT_RE_CACHE[field];
+}
+
 function looseExtractModelObject(text) {
   const title = extractJsonStringField(text, 'title');
   const html = extractJsonStringField(text, 'html');
@@ -175,8 +192,7 @@ function looseExtractModelObject(text) {
 }
 
 function extractJsonStringField(text, field) {
-  const marker = new RegExp(`"${field}"\\s*:\\s*"`, 'i');
-  const match = marker.exec(text);
+  const match = getFieldRe(field).exec(text);
   if (!match) return '';
   let i = match.index + match[0].length;
   let out = '';
@@ -211,8 +227,7 @@ function decodeJsonEscape(ch, text, index) {
 }
 
 function extractJsonObjectField(text, field) {
-  const marker = new RegExp(`"${field}"\\s*:\\s*`, 'i');
-  const match = marker.exec(text);
+  const match = getFieldObjectRe(field).exec(text);
   if (!match) return null;
   const start = text.indexOf('{', match.index + match[0].length);
   if (start === -1) return null;

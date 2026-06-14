@@ -441,16 +441,15 @@ async function generateNextHtml(session, event) {
     session.appState = normalizeAppState(session.appId || 'custom', session.appState, result.state);
     result.state = session.appState;
     session.messages.push(userMessage, { role: 'assistant', content: `Rendered "${result.title}". ${result.narration} State: ${JSON.stringify(result.state).slice(0, 800)}` });
-    // P2: Preserve the first user message (initial intent) — only prune middle pairs
-    while (session.messages.length > CONFIG.maxSessionMessages) {
-      // Skip index 0 (initial intent) — start pruning from index 2
-      if (session.messages.length > 4 && session.messages[2].role === 'user' && session.messages[3]?.role === 'assistant') {
-        session.messages.splice(2, 2);
-      } else if (session.messages.length > 2) {
-        session.messages.splice(2, 1);
-      } else {
-        break;
-      }
+    // P2: Preserve the first user message (initial intent) — only prune middle pairs.
+    // Single O(1) splice instead of an O(n) while-loop with repeated splice() calls.
+    // messages[0] is the initial intent; pruning starts at index 2 to keep that anchor.
+    if (session.messages.length > CONFIG.maxSessionMessages) {
+      const overflow = session.messages.length - CONFIG.maxSessionMessages;
+      // Keep at least the initial intent (index 0) and the new pair at the tail.
+      const maxPrunable = Math.max(0, session.messages.length - 2);
+      const pruneCount = Math.min(overflow, maxPrunable - 1);
+      if (pruneCount > 0) session.messages.splice(2, pruneCount);
     }
     t.stop({ ok: 1, hlen: result.html.length, mcnt: session.messages.length, prs: result.parseSource || '' });
     return result;

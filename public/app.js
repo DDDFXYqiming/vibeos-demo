@@ -69,6 +69,10 @@ const el = {
   overviewPrompt: document.getElementById('overviewPrompt')
 };
 
+// Reuse a single Intl formatter across tickClock() invocations — creating
+// Intl.DateTimeFormat every second costs ~1ms and emits GC pressure.
+const CLOCK_FORMAT = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', weekday: 'short' });
+
 boot();
 
 async function boot() {
@@ -104,8 +108,7 @@ function renderProvider(config) {
 }
 
 function tickClock() {
-  const now = new Date();
-  el.clock.textContent = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', weekday: 'short' }).format(now);
+  el.clock.textContent = CLOCK_FORMAT.format(new Date());
 }
 
 function bindGlobalEvents() {
@@ -756,21 +759,45 @@ function geometryOf(win) {
 function applyPatch(win, patch) {
   if (!patch || !patch.selector || !patch.html) return false;
   const iframe = win.querySelector('iframe');
-  try {
-    const doc = iframe?.contentDocument;
-    const target = doc?.querySelector(patch.selector);
-    if (target) {
-      if (patch.mode === 'replaceOuterHTML') target.outerHTML = patch.html;
-      else if (patch.mode === 'appendHTML') target.insertAdjacentHTML('beforeend', patch.html);
-      else target.innerHTML = patch.html;
-      return true;
+  let doc = null;
+  try { doc = iframe?.contentDocument; } catch {}
+  // 1) exact selector match
+  if (doc) {
+    const direct = safeQuery(doc, patch.selector);
+    if (direct) { applyMode(direct, patch); return true; }
+  }
+  // 2) fallback: walk all elements to find a match by id / first [data-vibe-action] /
+  //    any non-empty container. Preserves user input/focus by avoiding srcdoc replacement.
+  if (doc) {
+    const all = doc.querySelectorAll('*');
+    for (const el of all) {
+      if (el.id && patch.selector.includes(el.id)) { applyMode(el, patch); return true; }
     }
-  } catch {}
+    for (const el of all) {
+      const action = el.getAttribute && el.getAttribute('data-vibe-action');
+      if (action && patch.selector.includes(action)) { applyMode(el, patch); return true; }
+    }
+    for (const sel of ['#results', '#history', '#list', '#output', '#content', 'main', 'body']) {
+      const fallback = doc.querySelector(sel);
+      if (fallback) { applyMode(fallback, patch); return true; }
+    }
+  }
+  // 3) last resort: postMessage into the iframe (works even when same-origin access is denied)
   if (iframe?.contentWindow) {
     iframe.contentWindow.postMessage({ type: 'vibeos:patch', patch }, '*');
     return true;
   }
   return false;
+}
+
+function safeQuery(doc, selector) {
+  try { return doc.querySelector(selector); } catch { return null; }
+}
+
+function applyMode(target, patch) {
+  if (patch.mode === 'replaceOuterHTML') target.outerHTML = patch.html;
+  else if (patch.mode === 'appendHTML') target.insertAdjacentHTML('beforeend', patch.html);
+  else target.innerHTML = patch.html;
 }
 
 function loadingHtml(text) {
