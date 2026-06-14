@@ -14,6 +14,7 @@ import {
   storeCachedInitialResult
 } from './vibe-runtime.js';
 import {
+  extractAllStyleBlocks,
   generateWithParseRetry,
   normalizeModelResult as normalizeModelResultRobust,
   timeoutForModel
@@ -171,9 +172,11 @@ function id(prefix = 's') {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
 }
 
+// Concatenated CSS of every <style> block. Delegates to model-output's
+// splitStyleAndBody so we get the same answer for both sanitisation and
+// the event-prompt style contract.
 function extractStyleBlock(html) {
-  const match = String(html || '').match(/<style[^>]*>([\s\S]*?)<\/style>/i);
-  return match ? match[1].trim() : '';
+  return extractAllStyleBlocks(html);
 }
 
 function extractStructureOutline(html) {

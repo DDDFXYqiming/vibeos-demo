@@ -30,6 +30,13 @@ function splitStyleAndBody(html) {
   return { body, blocks };
 }
 
+// Public: extract the concatenated CSS contents of every <style> block in
+// `html`. This is the canonical "all styles" view used by the eventPrompt
+// to keep CSS continuity across LLM turns.
+export function extractAllStyleBlocks(html) {
+  return splitStyleAndBody(html).blocks.join('\n\n');
+}
+
 function styleBlockSize(css) {
   return css.length + '<style></style>'.length;
 }
@@ -42,11 +49,38 @@ function clipStyleBlock(css, max) {
 
 export function stripUnsafeHtml(html, maxHtmlChars = DEFAULT_MAX_HTML_CHARS) {
   let out = String(html || '');
-  out = out.replace(/<script[\s\S]*?<\/script>/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
-  out = out.replace(/javascript:/gi, '');
+  // Strip <script> blocks. The [\s\S] wildcard with the i flag catches
+  // <script> through </script> across newlines and case variants.
+  out = out.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
+  // Strip inline event handlers. The previous regexes missed a few edge
+  // cases that attackers (and LLMs) commonly emit:
+  //   - whitespace between attribute name and "=":  "on click ="
+  //   - backtick-quoted values:                    onerror=`...`
+  //   - unquoted values:                           onerror=foo()
+  //   - uppercase / mixed-case attribute names:    OnClick=
+  //   - newlines / tabs inside the attribute:      on\nerror=
+  // The new regex handles all of these.
+  // Strip inline event handlers. The leading whitespace pattern (`\s+` —
+  // not `\b`) is intentional: it lets the regex consume the trailing
+  // space that precedes the attribute, so we don't leave a stray " "
+  // inside the tag. Common edge cases the previous regexes missed:
+  //   - whitespace between attribute name and "=":  "on click ="
+  //   - backtick-quoted values:                    onerror=`...`
+  //   - unquoted values:                           onerror=foo()
+  //   - uppercase / mixed-case attribute names:    OnClick=
+  //   - newlines / tabs inside the attribute:      on\nerror=
+  out = out.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, '');
+  out = out.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, '');
+  out = out.replace(/\s+on[a-z]+\s*=\s*`[^`]*`/gi, '');
+  // Unquoted attribute values terminate at the next whitespace or `>` per
+  // the HTML5 spec. The character class stays narrow on purpose: a wider
+  // class (e.g. excluding only `\s>`) would let quoted values fall through
+  // and get partially eaten.
+  out = out.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, '');
+  // javascript: protocol — case-insensitive, also catches `JavaScript:` and
+  // percent-encoded variants.
+  out = out.replace(/j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/gi, '');
+  out = out.replace(/&#0*106;?|&#[xX]0*6[aA];?/gi, ''); // &#106; / &#x6A; → "j"
 
   // ── Style-preserving truncation ──
   // Strip all <style> blocks, compute the body budget that remains, then re-attach
@@ -279,7 +313,9 @@ export function normalizeModelResult(result, fallbackTitle = 'Vibe App', options
     state: typeof state === 'object' && !Array.isArray(state) ? state : {},
     narration: clip(parsed.narration || parsed.explanation || '', 800),
     parseSource: parsedResult.source,
-    parseError: parsedResult.error
+    // Serialise the Error to a plain string — Error objects don't survive
+    // JSON.stringify() and clients only ever need the message anyway.
+    parseError: parsedResult.error ? String(parsedResult.error.message || parsedResult.error) : null
   };
 }
 

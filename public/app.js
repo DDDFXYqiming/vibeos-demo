@@ -666,31 +666,40 @@ function enqueueSessionEvent(sessionId, event) {
   if (!record) return Promise.resolve();
   record.requestSeq = (record.requestSeq || 0) + 1;
   const seq = record.requestSeq;
-  record.queue = (record.queue || Promise.resolve()).then(() => sendSessionEvent(sessionId, event, seq));
-  return record.queue.catch(() => {});
+  // Chain onto the previous tail. The catch ensures a single failure does
+  // not poison the chain for subsequent events.
+  record.queue = (record.queue || Promise.resolve())
+    .catch(() => {}) // swallow previous tail failures so they don't propagate
+    .then(() => sendSessionEvent(sessionId, event, seq));
+  return record.queue;
 }
 
 async function sendSessionEvent(sessionId, event, seq) {
   const record = state.windows.get(sessionId);
   if (!record) return;
+  // If a newer event has already been applied (or applied is in flight), this
+  // old event is stale — its response is useless and consuming the
+  // lastPatchFailed hint here would be incorrect.
+  if (seq < (record.lastAppliedSeq || 0)) return;
   const win = record.element;
   focusWindow(win);
   setLoading(win, true);
 
-  // Surface "the last patch was rejected" to the server so the model can switch
-  // back to a full HTML render on this turn. Consumed once per request so the
-  // hint does not stick after the model recovers.
+  // Build the payload here, but DO NOT consume lastPatchFailed yet — we wait
+  // until the server actually receives the request. Otherwise an aborted /
+  // superseded event would eat the hint without telling the server.
   const payload = { ...event };
-  if (record.lastPatchFailed) {
-    payload.lastPatchFailed = true;
-    record.lastPatchFailed = false;
-  }
+  if (record.lastPatchFailed) payload.lastPatchFailed = true;
 
   try {
     const result = await api(`/api/sessions/${encodeURIComponent(sessionId)}/event`, {
       method: 'POST',
       body: JSON.stringify(payload)
     });
+    // Consume the hint atomically with the response. If the network
+    // request was somehow dropped before reaching the server, the
+    // record.lastPatchFailed flag remains set for the next event.
+    if (payload.lastPatchFailed) record.lastPatchFailed = false;
     if (seq < (record.lastAppliedSeq || 0)) return;
     record.lastAppliedSeq = seq;
     if (!result.silent) {
@@ -706,6 +715,7 @@ async function sendSessionEvent(sessionId, event, seq) {
       record.title = result.title || record.title;
     }
   } catch (error) {
+    // On error, keep lastPatchFailed set so the next attempt can re-send it.
     toast(error.message);
     setIframeHtml(win, diagnosticHtml('LLM event failed', error.message), sessionId, record.app?.appId);
   } finally {
