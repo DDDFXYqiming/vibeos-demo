@@ -9,84 +9,84 @@
 <body>
   <div id="boot" class="boot">
     <div class="boot-card">
-      <div class="boot-logo">◆</div>
+      <div class="boot-logo" aria-hidden="true">◆</div>
       <h1>VibeOS</h1>
       <p>LLM-powered desktop operating system</p>
-      <pre id="bootLog"></pre>
+      <pre id="bootLog" aria-live="polite" aria-atomic="true"></pre>
     </div>
   </div>
 
   <div id="desktop" class="desktop" aria-label="VibeOS desktop">
     <header class="topbar">
-      <button id="activitiesBtn" class="top-button activities">Activities</button>
+      <button id="activitiesBtn" class="top-button activities">Start</button>
       <div id="activeTitle" class="active-title">VibeOS Desktop</div>
       <div class="top-status">
         <span id="providerBadge" class="provider-badge">provider</span>
-        <span id="clock">--:--</span>
-        <button id="powerBtn" class="top-icon" title="Show runtime info">⏻</button>
+        <time id="clock">--:--</time>
+        <button id="powerBtn" class="top-icon" title="Show runtime info" aria-label="Runtime info">⏻</button>
       </div>
     </header>
 
-    <aside class="dock" aria-label="Application dock">
-      <button data-app="files" title="Files"><span>📁</span></button>
-      <button data-app="browser" title="Browser"><span>🌐</span></button>
-      <button data-app="terminal" title="Terminal"><span>▣</span></button>
-      <button data-app="calculator" title="Calculator"><span>🧮</span></button>
-      <button data-app="notepad" title="Text Editor"><span>📝</span></button>
-      <button data-app="tasks" title="Tasks"><span>☑</span></button>
-      <button data-app="settings" title="Settings"><span>⚙</span></button>
-      <button data-app="prompt" title="Vibe Prompt"><span>✨</span></button>
-      <button data-app="about" title="About"><span>◆</span></button>
-    </aside>
-
     <main id="workspace" class="workspace">
       <section class="desktop-card welcome-card">
-        <div class="ubuntu-mark">◆</div>
+        <div class="win11-mark" aria-hidden="true">◆</div>
         <h1>VibeOS Demo</h1>
-        <p>一个 Windows 原生可启动的“LLM 驱动幻觉桌面”演示：每个应用窗口是独立 iframe，每个 iframe 对应独立 session，点击/提交事件会回传给模型生成下一版界面。</p>
+        <p>一个 Windows 原生可启动的 LLM 驱动幻觉桌面演示：每个应用窗口是独立 iframe，每个 iframe 对应独立 session，点击/提交事件会回传给模型生成下一版界面。</p>
         <form id="quickPrompt" class="quick-prompt">
-          <input name="intent" placeholder="描述一个临时应用，例如：做一个世界杯投诉标签分析看板">
+          <input name="intent" type="text" placeholder="描述一个临时应用，例如：做一个世界杯投诉标签分析看板" aria-label="应用描述">
           <button type="submit">生成应用</button>
         </form>
       </section>
     </main>
 
+    <nav class="dock" aria-label="Application dock">
+      <button data-app="files" title="Files" aria-label="Files"><span aria-hidden="true">📁</span></button>
+      <button data-app="browser" title="Browser" aria-label="Browser"><span aria-hidden="true">🌐</span></button>
+      <button data-app="terminal" title="Terminal" aria-label="Terminal"><span aria-hidden="true">▣</span></button>
+      <button data-app="calculator" title="Calculator" aria-label="Calculator"><span aria-hidden="true">🧮</span></button>
+      <button data-app="notepad" title="Text Editor" aria-label="Text Editor"><span aria-hidden="true">📝</span></button>
+      <button data-app="tasks" title="Tasks" aria-label="Tasks"><span aria-hidden="true">☑</span></button>
+      <button data-app="settings" title="Settings" aria-label="Settings"><span aria-hidden="true">⚙</span></button>
+      <button data-app="prompt" title="Vibe Prompt" aria-label="Vibe Prompt"><span aria-hidden="true">✨</span></button>
+      <button data-app="about" title="About" aria-label="About"><span aria-hidden="true">◆</span></button>
+    </nav>
+
     <div id="overview" class="overview hidden">
       <div class="overview-panel">
         <form id="overviewPrompt" class="overview-search">
-          <input name="intent" placeholder="Search apps or describe a new app" autocomplete="off">
-          <button>Generate</button>
+          <input name="intent" type="search" placeholder="Search apps or describe a new app" autocomplete="off" aria-label="Search or describe app">
+          <button type="submit">Generate</button>
         </form>
-        <div class="app-grid">
-          <button data-app="files"><b>📁</b><span>Files</span></button>
-          <button data-app="browser"><b>🌐</b><span>Browser</span></button>
-          <button data-app="terminal"><b>▣</b><span>Terminal</span></button>
-          <button data-app="calculator"><b>🧮</b><span>Calculator</span></button>
-          <button data-app="notepad"><b>📝</b><span>Text Editor</span></button>
-          <button data-app="tasks"><b>☑</b><span>Tasks</span></button>
-          <button data-app="settings"><b>⚙</b><span>Settings</span></button>
-          <button data-app="prompt"><b>✨</b><span>Vibe Prompt</span></button>
-          <button data-app="about"><b>◆</b><span>About</span></button>
+        <div class="app-grid" role="list">
+          <button data-app="files" role="listitem"><b aria-hidden="true">📁</b><span>Files</span></button>
+          <button data-app="browser" role="listitem"><b aria-hidden="true">🌐</b><span>Browser</span></button>
+          <button data-app="terminal" role="listitem"><b aria-hidden="true">▣</b><span>Terminal</span></button>
+          <button data-app="calculator" role="listitem"><b aria-hidden="true">🧮</b><span>Calculator</span></button>
+          <button data-app="notepad" role="listitem"><b aria-hidden="true">📝</b><span>Text Editor</span></button>
+          <button data-app="tasks" role="listitem"><b aria-hidden="true">☑</b><span>Tasks</span></button>
+          <button data-app="settings" role="listitem"><b aria-hidden="true">⚙</b><span>Settings</span></button>
+          <button data-app="prompt" role="listitem"><b aria-hidden="true">✨</b><span>Vibe Prompt</span></button>
+          <button data-app="about" role="listitem"><b aria-hidden="true">◆</b><span>About</span></button>
         </div>
       </div>
     </div>
 
-    <div id="toast" class="toast hidden"></div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   </div>
 
   <template id="windowTemplate">
     <section class="window" role="dialog" aria-label="Vibe app window">
       <div class="window-header">
-        <div class="window-controls">
-          <button class="close" title="Close"></button>
-          <button class="minimize" title="Minimize"></button>
-          <button class="maximize" title="Maximize"></button>
-        </div>
         <div class="window-title">Window</div>
-        <div class="window-spinner hidden"></div>
+        <div class="window-spinner hidden" aria-hidden="true"></div>
+        <div class="window-controls">
+          <button class="minimize" title="Minimize" aria-label="Minimize window"></button>
+          <button class="maximize" title="Maximize" aria-label="Maximize window"></button>
+          <button class="close" title="Close" aria-label="Close window"></button>
+        </div>
       </div>
       <div class="window-body">
-        <iframe sandbox="allow-scripts allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>
+        <iframe sandbox="allow-scripts allow-forms allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="App content"></iframe>
       </div>
       <div class="resize-handle" aria-hidden="true"></div>
     </section>
