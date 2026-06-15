@@ -2,14 +2,14 @@
 
 一个 Windows 原生可运行的"纯 LLM/Agent 运行时生成 UI"的软件形态。
 
-> 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Ubuntu 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。应用状态由服务端 session 管理，LLM 通过结构化 JSON 维护每个应用的内部数据。
+> 这不是真正的操作系统，也不是微软项目源码。它是一个本地 Node.js + 浏览器桌面 shell：Windows 11 Fluent 风格界面、每个应用窗口一个 iframe、每个 iframe 一个独立 LLM session、用户点击/提交事件回传给后端，再由 LLM 生成下一版 HTML。应用状态由服务端 session 管理，LLM 通过结构化 JSON 维护每个应用的内部数据。
 
 ## 实现要点
 
 ```text
 Windows / Node.js 本地服务
         ↓
-Ubuntu 风格 Web Desktop Shell
+Windows 11 Fluent 风格 Web Desktop Shell
         ↓
 Window Manager：拖拽、缩放、最大化、关闭
         ↓
@@ -26,7 +26,7 @@ LLM 生成下一版 HTML + 结构化 state
 
 ## 功能
 
-- Ubuntu/Yaru 风格桌面：顶部栏、Dock、Activities、启动动画、窗口管理器。
+- Windows 11 Fluent 风格桌面：顶部栏、底部居中 Dock、启动动画、窗口管理器。
 - 每个应用独立 session：Browser、Terminal、Calculator、Files、Text Editor、Tasks、Settings、Vibe Prompt、About。
 - iframe 事件桥：自动捕获按钮点击、表单提交、输入框 Enter、select/checkbox/radio/range 变化。
 - LLM 后端：支持 OpenAI / OpenAI-compatible / Anthropic。
@@ -188,15 +188,15 @@ vibeos-demo/
   restart.ps1            stop + start 的组合脚本
   package.json           项目元数据，无第三方依赖
   src/server.js          Node.js HTTP 服务、LLM provider、session runtime、状态管理
-  src/logger.js          高熵 NDJSON 日志系统（hrtime 精度，自动清理）
+  `src/logger.js`          高熵 NDJSON 日志系统（hrtime 精度，自动清理、日志轮转、查询 API）
   public/index.html      桌面 shell HTML
-  public/styles.css      Ubuntu 风格桌面和窗口样式
+  `public/styles.css`      Windows 11 Fluent 风格桌面和窗口样式（浅色主题 + 深色模式支持）
   public/app.js          窗口管理器、iframe bridge、前端 runtime
 ```
 
 ## 日志
 
-服务运行时会在 `logs/` 目录生成结构化 NDJSON 日志（`app.log`），包含：
+服务运行时会在 `logs/` 目录生成结构化 NDJSON 日志（`vibeos-YYYYMMDD.ndjson`），包含：
 
 | 类别 | 说明 |
 |---|---|

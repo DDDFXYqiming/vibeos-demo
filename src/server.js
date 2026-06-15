@@ -58,7 +58,7 @@ const logs = [];
 // state stays consistent.
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const SESSION_GC_INTERVAL_MS = 60 * 1000; // 1 minute
-setInterval(() => {
+const gcTimer = setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions) {
     if (now - (session.lastActivityAt || 0) > SESSION_TTL_MS) {
@@ -66,7 +66,8 @@ setInterval(() => {
       logger.info('sess', { act: 'gc', sid: id, ageMs: now - session.lastActivityAt });
     }
   }
-}, SESSION_GC_INTERVAL_MS).unref?.();
+}, SESSION_GC_INTERVAL_MS);
+if (typeof gcTimer?.unref === 'function') gcTimer.unref();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -276,7 +277,7 @@ Hard rules:
 - Do not include <script>, external network resources, iframes, object/embed, or inline event handlers.
 - You may include <style> inside the HTML fragment.
 - Use semantic HTML, forms, buttons, inputs, tables, and CSS. The host runtime captures user events.
-- Keep the UI self-contained and visually close to Ubuntu/Yaru style: aubergine, orange accents, rounded panels, clean sans-serif typography.
+- Keep the UI self-contained and visually close to Windows 11 Fluent style: light surfaces, blue accent (#0078D4), rounded 8px corners, clean Segoe UI typography, subtle shadows, Mica material backgrounds.
 - Keep continuity from the previous HTML/state. Do not reset the app unless requested.
 - For calculators and simple deterministic operations, compute exactly.
 - When responding to user actions: FIRST update the "state" object, THEN render the HTML based on the updated state.
@@ -309,7 +310,7 @@ CRITICAL: You must also define an initial "state" object that represents the app
 - Custom app: design an appropriate state structure
 
 The state must capture ALL data that the user can modify through interactions.
-Use a consistent visual style across all generated HTML: dark terminal apps should use a dark background (#1e1e2e or similar) with monospace fonts and syntax highlighting. Light apps should use clean white/light-gray backgrounds. All apps should feel like native Ubuntu desktop software.
+Use a consistent visual style across all generated HTML: dark terminal apps should use a dark background (#1e1e2e or similar) with monospace fonts and syntax highlighting. Light apps should use clean white/light-gray backgrounds. All apps should feel like native Windows 11 desktop software.
 NEVER add banners, warnings, or disclaimers about simulated/generated/AI content. Present everything as real.`;
 }
 

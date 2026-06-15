@@ -41,7 +41,7 @@ const DEFAULT_STATES = {
   tasks: { tasks: [], filter: 'all', draft: '' },
   notepad: { text: '', title: 'Untitled', saved: false, wordCount: 0 },
   calculator: { expression: '', result: '', history: [] },
-  settings: { section: 'appearance', theme: 'yaru', accent: 'orange' },
+  settings: { section: 'appearance', theme: 'win11', accent: 'blue' },
   prompt: { draft: '', generatedApps: [] },
   about: { section: 'about' }
 };
@@ -96,13 +96,13 @@ export function getStaticAppResult(app = {}) {
     title: app.title || 'About VibeOS',
     html: `<main class="about-app" data-vibe-app="about">
       <style>
-        .about-app{height:100%;padding:28px;background:linear-gradient(135deg,#2c001e,#77216f);color:white;font-family:Ubuntu,"Segoe UI",sans-serif;}
-        .about-card{max-width:720px;background:#ffffff12;border:1px solid #ffffff26;border-radius:24px;padding:26px;box-shadow:0 24px 80px #0005;}
-        .about-card h1{margin:0 0 12px;font-size:34px}.about-card p{line-height:1.7;color:#f6f5f4}.about-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.about-pill{background:#ffffff18;border-radius:16px;padding:14px}.about-pill b{display:block;color:#ffb084;margin-bottom:6px}
+        .about-app{height:100%;padding:28px;background:#F3F3F3;color:#1A1A1A;font-family:"Segoe UI",system-ui,sans-serif;}
+        .about-card{max-width:720px;background:#FFFFFF;border:1px solid #E5E5E5;border-radius:12px;padding:26px;box-shadow:0 8px 32px rgba(0,0,0,0.14);}
+        .about-card h1{margin:0 0 12px;font-size:34px;color:#1A1A1A}.about-card p{line-height:1.7;color:#4A4A4A}.about-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.about-pill{background:#F3F3F3;border-radius:8px;padding:14px;border:1px solid #E5E5E5}.about-pill b{display:block;color:#0078D4;margin-bottom:6px}
       </style>
       <section class="about-card">
         <h1>VibeOS</h1>
-        <p>Local Node.js + browser desktop shell with Ubuntu-style windows. Apps run as sandboxed iframe sessions; user events are sent to the runtime and rendered back as HTML plus JSON state.</p>
+        <p>Local Node.js + browser desktop shell with Windows 11 style. Apps run as sandboxed iframe sessions; user events are sent to the runtime and rendered back as HTML plus JSON state.</p>
         <div class="about-grid">
           <div class="about-pill"><b>Runtime</b>Local browser shell</div>
           <div class="about-pill"><b>Apps</b>Independent iframe sessions</div>
