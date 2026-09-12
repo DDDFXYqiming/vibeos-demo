@@ -1,4 +1,4 @@
-$proc = Start-Process -FilePath "node" -ArgumentList "src/server.js" -WorkingDirectory "E:\AI_Projects\vibeos-demo" -WindowStyle Hidden -PassThru
+$proc = Start-Process -FilePath "node" -ArgumentList "src/server.js" -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
 Write-Output "Started node with PID: $($proc.Id)"
 Start-Sleep -Seconds 3
 $conn = Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue
