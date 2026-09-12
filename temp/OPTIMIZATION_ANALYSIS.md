@@ -2,7 +2,7 @@
 
 > **范围**：本报告只讨论"纯代码技术层面"的优化点（性能 / 健壮性 / 可维护性 / 资源占用 / 测试覆盖），不动产品方向、不改 API 行为契约。
 >
-> **基准**：本地 `E:\AI_Projects\vibeos-demo`，已 fast-forward 至远端最新 `3ace54d`（含最新 patch-failure 反馈链路）。
+> 本文记录提交 `3ace54d` 的性能与实现分析，后续版本需重新验证。
 >
 > **方法**：`codegraph` 全量索引 → 逐文件 read + node → 交叉对照测试 → 按"高/中/低"影响度与"小/中/大"改造量整理。
 > 报告末尾附"建议执行顺序"。
@@ -385,7 +385,7 @@ function safeJoin(base, requestedPath) {
 ```
 
 **问题**：
-- Windows 上 `base = 'E:\AI_Projects\vibeos-demo\public'`，`requestedPath = '../src/server.js'` 不会逃出 base，但 `requestedPath = '/abs/path'` 走 `replace(/^\/+/, '')` 后变成 `'abs/path'`，`path.resolve('E:\\...\\public', 'abs/path')` 实际还是会逃出。
+路径解析需要通过目标规范化和相对路径检查来验证边界，不能只依赖字符串前缀。
 - 应再加一个"解码后 URL 必须以 base 为前缀"用 `path.relative(base, resolved)` 然后检查是否以 `..` 开头。
 
 ---
@@ -600,5 +600,4 @@ out = out.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
 
 ---
 
-**报告完。** 报告路径：`E:\AI_Projects\vibeos-demo\temp\OPTIMIZATION_ANALYSIS.md`。
 （接下来若你点头开干，我会按 Phase 1 顺序逐一落地，每个改动单 commit + 单测试覆盖。）

@@ -270,7 +270,7 @@ response_format: { "type": "json_object" }
 
 ### 3. 为什么不让 LLM 执行本地命令？
 
-因为这个 demo 的目标是复现"幻觉 UI runtime"，不是做 agent shell。执行本地命令会引入高风险权限边界问题。本项目除了 LLM 幻觉以外什么都没有。
+这个 demo 由模型生成应用界面与状态变化。Browser、Files 和 Terminal 窗口展示模拟内容，不提供宿主系统命令执行能力。
 
 ## 局限
 
