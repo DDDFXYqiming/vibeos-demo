@@ -10,20 +10,14 @@
 
 ## 核心设计与工作流程
 
-```
-[Node.js 核心服务]
-        │
-        ▼
-[Windows 11 / Ubuntu 风格 Web 桌面外壳]
-        │
-        ▼
-[窗口管理器与独立 iframe 应用沙盒]
-        │
-        ▼ (捕获点击、输入与提交事件)
-[POST /api/sessions/:id/event]
-        │
-        ▼ (大模型生成下一个 HTML 文档与 JSON 状态)
-[动态更新 iframe srcdoc 并持久化会话状态]
+```mermaid
+flowchart TD
+    A["Node.js 核心服务 (server.js)"] --> B["Web 桌面外壳 (Win11 / Ubuntu 双模)"]
+    B --> C["窗口管理器与独立 iframe 沙盒"]
+    C -->|捕获点击、表单提交事件| D["POST /api/sessions/:id/event"]
+    D --> E["LLM 实时合成下一帧 HTML 与 JSON 状态"]
+    E --> F["动态写入 iframe srcdoc 并持久化会话"]
+    F --> C
 ```
 
 * **独立沙盒会话隔离**：每个应用窗口拥有专有会话 ID 与状态字典，窗口间运行环境严格物理隔离。
@@ -85,20 +79,17 @@ LLM_THINKING_LEVEL=off
 
 ## 目录结构
 
-```text
-vibeos-demo/
-├── .env.example           # 运行参数与模型配置模板
-├── start.ps1 / stop.ps1   # Windows 快捷启停脚本
-├── src/
-│   ├── server.js          # HTTP 服务、会话生命周期与模型分发调度
-│   ├── model-output.js    # JSON 状态结构化提取与响应校验
-│   ├── vibe-runtime.js    # 运行时动态界面注入辅助脚本
-│   └── logger.js          # NDJSON 结构化轮转日志记录器
-└── public/
-    ├── index.html         # 桌面外壳结构
-    ├── styles.css         # 窗口管理器与桌面主题样式
-    └── app.js             # 窗口调度系统与 iframe 通信事件桥
-```
+* **`.env.example`**：运行参数与模型配置模板
+* **`start.ps1` / `stop.ps1`**：Windows 快捷启停脚本
+* **`src/`**：核心服务端实现
+  * `server.js`：HTTP 服务、会话生命周期与模型分发调度
+  * `model-output.js`：JSON 状态结构化提取与响应校验
+  * `vibe-runtime.js`：运行时动态界面注入辅助脚本
+  * `logger.js`：NDJSON 结构化轮转日志记录器
+* **`public/`**：前端桌面与窗口管理器
+  * `index.html`：桌面外壳骨架
+  * `styles.css`：窗口管理器与桌面主题样式
+  * `app.js`：窗口调度系统与 iframe 通信事件桥
 
 ---
 

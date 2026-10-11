@@ -10,20 +10,14 @@
 
 ## Architecture & Interaction Loop
 
-```
-[Node.js Core Server]
-        │
-        ▼
-[Windows 11 / Ubuntu-Style Desktop Shell]
-        │
-        ▼
-[Window Manager & Sandboxed App iframes]
-        │
-        ▼ (Intercepts click, input & form events)
-[POST /api/sessions/:id/event]
-        │
-        ▼ (LLM returns next HTML document & JSON state)
-[Replace iframe srcdoc & persist session state]
+```mermaid
+flowchart TD
+    A["Node.js Core Server (server.js)"] --> B["Desktop Shell (Win11 / Ubuntu Themes)"]
+    B --> C["Window Manager & Sandboxed iframes"]
+    C -->|Intercepts clicks and form submits| D["POST /api/sessions/:id/event"]
+    D --> E["LLM Synthesizes Next HTML Document & JSON State"]
+    E --> F["Dynamic Update of iframe srcdoc & Session Persistence"]
+    F --> C
 ```
 
 * **Isolated Sandbox Execution**: Every application window runs in a decoupled iframe with its own session state, preventing cross-window script interference.
@@ -85,20 +79,17 @@ LLM_THINKING_LEVEL=off
 
 ## Repository Structure
 
-```text
-vibeos-demo/
-├── .env.example           # Runtime environment template
-├── start.ps1 / stop.ps1   # Windows process automation scripts
-├── src/
-│   ├── server.js          # HTTP dispatch, provider routing, and sessions
-│   ├── model-output.js    # JSON state extraction and schema validation
-│   ├── vibe-runtime.js    # App runtime injection utilities
-│   └── logger.js          # Structured NDJSON log rotator
-└── public/
-    ├── index.html         # Desktop shell layout
-    ├── styles.css         # Window manager styling
-    └── app.js             # Window supervisor and iframe event bridge
-```
+* **`.env.example`**: Runtime environment parameters and provider template
+* **`start.ps1` / `stop.ps1`**: Windows process automation scripts
+* **`src/`**: Server-side engine
+  * `server.js`**: HTTP API, session lifecycle management, and provider routing
+  * `model-output.js`**: Structured JSON state extraction and validation
+  * `vibe-runtime.js`**: Runtime UI injection script
+  * `logger.js`**: NDJSON structured log rotator
+* **`public/`**: Frontend desktop and window manager
+  * `index.html`**: Desktop shell layout
+  * `styles.css`**: Window manager styling and theme rules
+  * `app.js`**: Window supervisor and iframe event bridge
 
 ---
 
